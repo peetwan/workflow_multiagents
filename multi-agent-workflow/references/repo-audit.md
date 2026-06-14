@@ -23,6 +23,7 @@ Look for:
   `Cargo.toml`, `go.mod`, or deployment config
 - docs folders: `docs`, `docs_th`, `wiki`, root `README.md`
 - ops folders: `.github`, `scripts`, `infra`, `deploy`, `.agents`
+- agent rule files: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, IDE/agent rules
 - parked or protected folders named by the user
 
 Default to conservative streams:
@@ -55,8 +56,9 @@ Install the workflow only after:
 - existing coordination files have been inspected
 - generated config can be reviewed after install
 
-Never overwrite project-specific `AGENTS.md`, PR templates, or scripts without
-checking whether they contain existing local rules.
+Never overwrite project-specific `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, IDE
+rules, PR templates, or scripts without checking whether they contain existing
+local rules.
 
 ## Publish Decision
 

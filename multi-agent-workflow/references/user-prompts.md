@@ -5,13 +5,13 @@
 Users can speak normally:
 
 ```text
-Set up this repo so Claude and Codex can work in parallel without touching each
-other's files.
+Set up this repo so Claude, Codex, Gemini, Antigravity, and Qwen can work in
+parallel without touching each other's files.
 ```
 
 ```text
-Dispatch one Claude task for PDFM docs and one Codex task for basket frontend.
-Keep them in separate worktrees.
+Dispatch one Claude task for docs, one Codex task for frontend, and one Qwen
+task for tests. Keep them in separate worktrees.
 ```
 
 ```text
@@ -22,11 +22,15 @@ give me copy-paste prompts for each agent.
 ## Dispatch Examples
 
 ```powershell
-python scripts/multiagent.py dispatch --stream docs --task "refresh deployment docs" --agent claude-docs --paths "docs/deploy.md"
+python scripts/multiagent.py dispatch --stream docs --task "refresh deployment docs" --agent claude-docs --agent-type claude --paths "docs/deploy.md"
 ```
 
 ```powershell
-python scripts/multiagent.py dispatch --stream frontend --task "mobile nav polish" --agent codex-ui --paths "src/components/Nav.tsx","src/styles/nav.css"
+python scripts/multiagent.py dispatch --stream frontend --task "mobile nav polish" --agent codex-ui --agent-type codex --paths "src/components/Nav.tsx","src/styles/nav.css"
+```
+
+```powershell
+python scripts/multiagent.py dispatch --stream tests --task "add edge cases" --agent qwen-tests --agent-type qwen --paths "tests/"
 ```
 
 ## Generated Agent Prompt Shape
@@ -60,6 +64,6 @@ Before final answer:
 ## User Follow-Up After Agents Finish
 
 ```text
-Claude and Codex are done. Inspect both branches, verify checks, then merge or
-commit/push the completed work to GitHub.
+Claude, Codex, and Qwen are done. Inspect all branches, verify checks, then
+merge or commit/push the completed work to GitHub.
 ```

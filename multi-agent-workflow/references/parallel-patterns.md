@@ -50,10 +50,12 @@ Use the narrowest useful ownership:
 
 If a task needs shared files, assign one owner and make other agents wait.
 
-## Mixed Claude + Codex Usage
+## Mixed Agent Usage
 
-Different programs do not share chat context. Paste the generated dispatch
-prompt into each program. The prompt must include:
+Different programs do not share chat context. Codex, Claude, Gemini,
+Antigravity, Qwen, and openweight/local agents should all receive a complete
+dispatch prompt. Paste the generated dispatch prompt into each program. The
+prompt must include:
 
 - exact worktree path
 - branch
@@ -62,7 +64,8 @@ prompt into each program. The prompt must include:
 - verification command/expectation
 - final report format
 
-Tell each tool to open or work only in its own worktree.
+Tell each tool to open or work only in its own worktree. The main checkout is
+for coordination and integration only.
 
 ## Verification
 

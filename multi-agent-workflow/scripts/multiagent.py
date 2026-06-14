@@ -628,12 +628,22 @@ def make_task_card(
     )
 
 
+def infer_agent_type(agent: str) -> str:
+    """Guess the runtime from the agent label so --agent-type can be omitted."""
+    name = (agent or "").lower()
+    for kind in ("antigravity", "openweight", "codex", "claude", "gemini", "qwen"):
+        if kind in name:
+            return kind
+    return "generic"
+
+
 def dispatch(args: argparse.Namespace, repo: Path) -> None:
     config = load_config(repo)
     stream = stream_config(config, args.stream)
     if stream.get("status") == "parked" and not args.force:
         raise SystemExit(f"Stream '{args.stream}' is parked. Use --force only if the user explicitly unparked it.")
     task_id = now_id(args.agent, args.task)
+    agent_type = args.agent_type or infer_agent_type(args.agent)
     paths = [norm_path(p) for p in (args.paths or stream.get("paths", []))]
     if not paths:
         raise SystemExit("No paths configured. Pass --paths or update .agents/workflow-config.toml.")
@@ -652,7 +662,7 @@ def dispatch(args: argparse.Namespace, repo: Path) -> None:
     create_worktree(repo, branch, worktree, base, args.no_fetch)
     task_card = make_task_card(
         args.agent,
-        args.agent_type,
+        agent_type,
         args.task,
         args.stream,
         branch,
@@ -672,7 +682,7 @@ def dispatch(args: argparse.Namespace, repo: Path) -> None:
         "stream": args.stream,
         "task": args.task,
         "agent": args.agent,
-        "agentType": args.agent_type,
+        "agentType": agent_type,
         "branch": branch,
         "base": base,
         "worktreePath": str(worktree),
@@ -682,14 +692,13 @@ def dispatch(args: argparse.Namespace, repo: Path) -> None:
         "createdAt": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(f"Dispatch ready: {task_id}")
-    print(f"Worktree: {worktree}")
-    print(f"Branch: {branch}")
-    print(f"Task Card: {worktree_task_path}")
-    print(f"Handoff copy: {handoff_path}")
-    print("\nNext:")
-    print("- Open the worktree in the target agent/runtime.")
-    print("- In natural language, ask it to work from `.agents/current-task.md`.")
+    owned = ", ".join(paths) if paths else "(stream default)"
+    print(f"\n[ready] {args.stream} task -> {args.agent} ({agent_type})   id: {task_id}")
+    print("  1. open this folder in the agent:")
+    print(f"       {worktree}")
+    print('  2. tell it:  Work on the current task in .agents/current-task.md')
+    print(f"  owns: {owned}")
+    print(f"  branch: {branch}   handoff text: {handoff_path}")
     if args.print_handoff:
         print("\nOptional handoff text:\n")
         print(task_card)
@@ -845,7 +854,7 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch_p.add_argument("--stream", required=True)
     dispatch_p.add_argument("--task", required=True)
     dispatch_p.add_argument("--agent", required=True)
-    dispatch_p.add_argument("--agent-type", default="generic", choices=sorted(AGENT_TYPE_NOTES))
+    dispatch_p.add_argument("--agent-type", default=None, choices=sorted(AGENT_TYPE_NOTES), help="Runtime note. Omit to infer from the --agent name.")
     dispatch_p.add_argument("--paths", nargs="*")
     dispatch_p.add_argument("--base")
     dispatch_p.add_argument("--no-fetch", action="store_true")

@@ -30,14 +30,16 @@ the frontend without clashing"):
    coordination files. Skim the generated config; fix streams only if detection
    is wrong.
 
-2. **Dispatch one task per agent** with the narrowest paths covering the work:
+2. **Dispatch one task per agent.** The minimum is three flags — the agent type
+   is inferred from the agent name and paths default to the stream's:
 
    ```powershell
-   python scripts/multiagent.py dispatch --stream <stream> --task "<short task>" --agent <name> --agent-type <type> --paths <files-or-folders>
+   python scripts/multiagent.py dispatch --stream <stream> --task "<short task>" --agent <name>
    ```
 
-   Overlapping paths with another active task are refused automatically, so two
-   agents can never be put on the same files by accident.
+   Add `--paths <files-or-folders>` to narrow ownership when several agents share
+   a stream. Overlapping paths with another active task are refused
+   automatically, so two agents can never be put on the same files by accident.
 
 3. **Hand off in one sentence.** Tell the user which folder to open in each agent
    and to say: *"Work on the current task in `.agents/current-task.md`."* That
@@ -51,6 +53,15 @@ the frontend without clashing"):
 
 Everything below is the detailed reference for when the seamless path needs
 adjusting.
+
+## When This Helps (And When It Is Overhead)
+
+Use it when two or more agents work the same repo at once and could touch
+overlapping files — isolated worktrees plus `guard` are exactly what protect that
+case, which a shared working tree cannot. For a single agent, or work in
+obviously separate folders/repos that will not collide, the worktree setup is not
+worth it; edit directly. This skill exists to make parallel work safe, not to add
+ceremony to simple work.
 
 ## Required Workflow
 

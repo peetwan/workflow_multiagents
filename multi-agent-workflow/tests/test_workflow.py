@@ -129,12 +129,16 @@ def main() -> int:
         a = cli(repo, "dispatch", "--stream", "frontend", "--task", "nav polish",
                 "--agent", "claude-a", "--agent-type", "claude", "--paths", "frontend/")
         check("dispatch A (frontend) exits 0", a.returncode == 0, a.stderr)
+        # Minimal 3-flag form: no --agent-type (inferred from the name) and no
+        # --paths (defaults to the stream's). This is the seamless path.
         b = cli(repo, "dispatch", "--stream", "backend", "--task", "auth fix",
-                "--agent", "codex-b", "--agent-type", "codex", "--paths", "backend/")
-        check("dispatch B (backend) exits 0", b.returncode == 0, b.stderr)
+                "--agent", "codex-b")
+        check("dispatch B (minimal 3-flag form) exits 0", b.returncode == 0, b.stderr)
 
         ma = manifest_for(repo, "claude-a")
         mb = manifest_for(repo, "codex-b")
+        check("agent-type inferred from name (codex)", mb.get("agentType") == "codex", str(mb.get("agentType")))
+        check("paths defaulted from stream when --paths omitted", mb.get("paths") == ["backend"], str(mb.get("paths")))
         wta = Path(ma["worktreePath"])
         wtb = Path(mb["worktreePath"])
         check("worktree A exists", wta.exists(), str(wta))

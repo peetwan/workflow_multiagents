@@ -16,6 +16,42 @@ default design is:
 one user request = one task card = one agent = one branch = one worktree = one manifest
 ```
 
+## Seamless Mode (Start Here)
+
+This is the 90% path. The user speaks plainly; you (the orchestrating agent) run
+at most one command per task. The user never memorizes the CLI.
+
+When the user asks for parallel agents (e.g. "let Claude do the docs and Codex do
+the frontend without clashing"):
+
+1. **Set up once.** If `.agents/workflow-config.toml` is missing, run
+   `python <skill>/scripts/multiagent.py init --repo <repo>`. `init` inspects the
+   repo, auto-detects streams from the folder layout, and installs the
+   coordination files. Skim the generated config; fix streams only if detection
+   is wrong.
+
+2. **Dispatch one task per agent** with the narrowest paths covering the work:
+
+   ```powershell
+   python scripts/multiagent.py dispatch --stream <stream> --task "<short task>" --agent <name> --agent-type <type> --paths <files-or-folders>
+   ```
+
+   Overlapping paths with another active task are refused automatically, so two
+   agents can never be put on the same files by accident.
+
+3. **Hand off in one sentence.** Tell the user which folder to open in each agent
+   and to say: *"Work on the current task in `.agents/current-task.md`."* That
+   file is the full contract (worktree, allowed paths, blocked paths, report
+   format) — no long prompt to paste.
+
+4. **Guard before merge.** After agents finish, from the main checkout run
+   `python scripts/multiagent.py guard`. It reports any file edited outside an
+   agent's allowed paths and flags collisions with another task's lane. Re-scope
+   or move the work before merging.
+
+Everything below is the detailed reference for when the seamless path needs
+adjusting.
+
 ## Required Workflow
 
 1. **Inspect before installing or dispatching.**
@@ -31,7 +67,8 @@ one user request = one task card = one agent = one branch = one worktree = one m
 
 2. **Design streams and path ownership.**
    Streams are product or responsibility areas such as `frontend`, `backend`,
-   `docs`, `ops`, `basket`, `pdfm`, or `api`. Each stream must define:
+   `web`, `api`, `docs`, or `ops` — whatever the repo's folders imply. Each
+   stream must define:
 
    - status: `active`, `shared`, or `parked`
    - owned paths
@@ -58,7 +95,7 @@ one user request = one task card = one agent = one branch = one worktree = one m
    Prefer exact files or folders for concurrent work in the same stream:
 
    ```powershell
-   python scripts/multiagent.py dispatch --stream pdfm --task "mobile ticker polish" --agent claude-a --paths "pdfm-dashboard/src/components/TickerList.tsx"
+   python scripts/multiagent.py dispatch --stream frontend --task "mobile nav polish" --agent claude-a --paths "src/components/Nav.tsx"
    ```
 
    The dispatcher creates the worktree, branch, local manifest, and
@@ -76,10 +113,14 @@ one user request = one task card = one agent = one branch = one worktree = one m
    python scripts/multiagent.py dispatch --stream frontend --task "nav polish" --agent qwen-a --agent-type qwen --paths "src/Nav.tsx"
    ```
 
-6. **Verify before publishing.**
-   Run repo-specific checks inside the agent worktree. If the user asks to push
-   to GitHub, commit intentionally and push the branch requested by the user. Do
-   not push a production/deploy-tracked branch unless the user explicitly asked.
+6. **Guard, then verify before publishing.**
+   From the main checkout run `python scripts/multiagent.py guard` to confirm
+   every active task changed only files inside its allowed paths — it flags
+   out-of-scope edits and collisions with another task's lane, and exits
+   non-zero on any violation. Then run repo-specific checks inside the agent
+   worktree. If the user asks to push to GitHub, commit intentionally and push
+   the branch requested by the user. Do not push a production/deploy-tracked
+   branch unless the user explicitly asked.
 
 ## When To Ask The User
 
@@ -97,8 +138,12 @@ Ask before proceeding when:
 
 ## Bundled Resources
 
-- `scripts/multiagent.py`: cross-project CLI for inspect, setup, install,
-  doctor, examples, dispatch, status, task handoff, and close operations.
+- `scripts/multiagent.py`: cross-project CLI for inspect, setup/init, install,
+  doctor, examples, dispatch, status, task handoff, guard (anti-collision
+  check), and close operations.
+- `tests/test_workflow.py`: end-to-end test on a throwaway repo proving universal
+  setup, one-line dispatch, dispatch-time overlap blocking, and guard catching
+  out-of-lane edits. Run `python tests/test_workflow.py`.
 - `references/repo-audit.md`: repo inspection and install decision checklist.
 - `references/parallel-patterns.md`: detailed workflow patterns and merge rules.
 - `references/agent-adapters.md`: notes for Codex, Claude, Gemini,

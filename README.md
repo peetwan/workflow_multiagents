@@ -128,7 +128,11 @@ python scripts/multiagent.py doctor
 python scripts/multiagent.py status
 python scripts/multiagent.py dispatch --stream frontend --task "nav polish" --agent claude-a --agent-type claude --paths "src/Nav.tsx"
 python scripts/multiagent.py dispatch --stream tests --task "edge cases" --agent qwen-a --agent-type qwen --paths "tests/"
+python scripts/multiagent.py guard
 ```
+
+`setup` has an `init` alias. `guard` verifies, before merge, that each agent
+only touched files inside its allowed paths.
 
 Supported `--agent-type` values:
 
@@ -171,7 +175,10 @@ Runtime files are ignored by git:
 - Inspect the repo before installing.
 - Use one branch and one worktree per task.
 - Use narrow path ownership whenever agents run in parallel.
-- Block overlapping active task manifests by default.
+- Block overlapping active task manifests at dispatch time.
+- Run `multiagent.py guard` before merge to catch any agent that edited outside
+  its allowed paths or collided with another task's lane — verifiable, not just a
+  written rule.
 - Keep the main checkout for coordination and integration.
 - Ask before touching protected/parked paths or production-deploy branches.
 

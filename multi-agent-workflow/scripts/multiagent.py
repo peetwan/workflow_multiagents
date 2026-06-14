@@ -106,6 +106,7 @@ paths, run checks, and report changed files, checks, and risks.
 ```powershell
 python scripts/multiagent.py doctor
 python scripts/multiagent.py status
+python scripts/multiagent.py guard
 python scripts/multiagent.py examples
 ```
 
@@ -151,7 +152,12 @@ def slug(value: str) -> str:
 
 
 def norm_path(value: str) -> str:
-    return value.strip().strip('"').strip("'").replace("\\", "/").lstrip("./").rstrip("/")
+    # Strip a leading "./" prefix without eating the leading dot of dotfiles such
+    # as ".github" or ".agents" (str.lstrip treats its arg as a character set).
+    cleaned = value.strip().strip('"').strip("'").replace("\\", "/")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return cleaned.rstrip("/")
 
 
 def overlaps(left: str, right: str) -> bool:
@@ -357,6 +363,7 @@ def install(repo: Path, force: bool = False, agent_files: bool = True) -> None:
                 Use `scripts/multiagent.py dispatch --stream <stream> --task <task> --agent <name> --agent-type <type> --paths <paths...>` to create isolated work.
                 In each worktree, read `.agents/current-task.md` before editing.
                 Keep edits inside the Task Card's allowed paths.
+                Run `scripts/multiagent.py guard` from the main checkout to confirm no agent edited outside its allowed paths.
                 Close the task manifest after merge with `scripts/multiagent.py close --id <task-id>`.
                 """
             ),
@@ -723,6 +730,99 @@ def close(repo: Path, task_id: str, status_value: str) -> None:
     print(f"Marked {task_id} as {status_value}.")
 
 
+def _is_runtime_artifact(path: str) -> bool:
+    """Workflow coordination files the dispatcher writes, not agent product work."""
+    p = norm_path(path)
+    return (
+        p == ".agents/current-task.md"
+        or p.startswith(".agents/tasks/")
+        or p.startswith(".agents/locks/")
+    )
+
+
+def worktree_changes(worktree: Path, base: str) -> list[str]:
+    """Files a worktree changed relative to its base branch.
+
+    Includes committed-on-branch and uncommitted tracked changes plus untracked
+    files, so it reflects everything the task actually touched. Workflow runtime
+    artifacts (the Task Card and coordination state) are excluded because the
+    dispatcher writes them, not the agent.
+    """
+    files: set[str] = set()
+    diff = git(worktree, "diff", "--name-only", base, check=False)
+    if diff.returncode == 0:
+        files.update(line.strip() for line in diff.stdout.splitlines() if line.strip())
+    others = git(worktree, "ls-files", "--others", "--exclude-standard", check=False)
+    if others.returncode == 0:
+        files.update(line.strip() for line in others.stdout.splitlines() if line.strip())
+    return sorted(f for f in files if not _is_runtime_artifact(f))
+
+
+def guard(repo: Path, task_id: str | None) -> None:
+    """Verify each active task only changed files inside its allowed paths.
+
+    This is the anti-collision check. Even if an agent ignores its Task Card,
+    any edit outside its allowed paths is reported, and any edit that lands on a
+    path owned by another active task is flagged as a COLLISION. Run it from the
+    main checkout. Exits non-zero when any violation is found.
+    """
+    active = [m for m in load_manifests(repo) if m.get("status", "active") not in {"closed", "merged"}]
+    if task_id:
+        targets = [m for m in active if m.get("id") == task_id]
+        if not targets:
+            raise SystemExit(f"No active task manifest for id '{task_id}'.")
+    else:
+        targets = active
+
+    if not targets:
+        print("No active tasks to guard.")
+        return
+
+    owners = []
+    for m in active:
+        for p in m.get("paths", []):
+            owners.append((norm_path(p), m.get("id", ""), m.get("agent", "")))
+
+    violations = 0
+    for m in targets:
+        task = m.get("id", "")
+        worktree = Path(m.get("worktreePath", ""))
+        allowed = [norm_path(p) for p in m.get("paths", [])]
+        base = m.get("base", "main")
+        print(f"\n== {task} [{m.get('stream')}] {m.get('agent')}")
+        if not worktree.exists():
+            print(f"  ! worktree missing: {worktree}")
+            continue
+        changed = worktree_changes(worktree, base)
+        if not changed:
+            print("  clean: no changes vs base")
+            continue
+        task_violations = []
+        for f in changed:
+            nf = norm_path(f)
+            if any(overlaps(nf, a) for a in allowed):
+                continue
+            collide = next((o for o in owners if o[1] != task and overlaps(nf, o[0])), None)
+            if collide:
+                task_violations.append(f"  COLLISION    {f}  -> owned by {collide[1]} ({collide[2]})")
+            else:
+                task_violations.append(f"  OUT-OF-SCOPE {f}  (outside allowed paths)")
+        if task_violations:
+            violations += len(task_violations)
+            print(f"  {len(changed)} changed file(s), {len(task_violations)} violation(s):")
+            for v in task_violations:
+                print(v)
+        else:
+            print(f"  OK: all {len(changed)} changed file(s) inside allowed paths")
+
+    if violations:
+        raise SystemExit(
+            f"\nGuard failed: {violations} path violation(s). "
+            "Move the work into the owning task's worktree before merge."
+        )
+    print("\nGuard passed: every task stayed inside its allowed paths.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Coordinate parallel AI-agent work in a Git repo.")
     parser.add_argument("--repo", default=".", help="Target repository path")
@@ -732,6 +832,9 @@ def build_parser() -> argparse.ArgumentParser:
     setup_p = sub.add_parser("setup", help="Inspect and install the universal workflow in one simple command.")
     setup_p.add_argument("--force", action="store_true")
     setup_p.add_argument("--no-agent-files", action="store_true")
+    init_p = sub.add_parser("init", help="Alias for setup: inspect, then install the workflow.")
+    init_p.add_argument("--force", action="store_true")
+    init_p.add_argument("--no-agent-files", action="store_true")
     install_p = sub.add_parser("install")
     install_p.add_argument("--force", action="store_true")
     install_p.add_argument("--no-agent-files", action="store_true")
@@ -757,6 +860,8 @@ def build_parser() -> argparse.ArgumentParser:
     close_p = sub.add_parser("close")
     close_p.add_argument("--id", required=True)
     close_p.add_argument("--status", default="closed", choices=["closed", "merged"])
+    guard_p = sub.add_parser("guard", help="Verify active tasks stayed inside their allowed paths (anti-collision check).")
+    guard_p.add_argument("--id", help="Guard a single task id. Default: all active tasks.")
     return parser
 
 
@@ -765,7 +870,7 @@ def main() -> None:
     repo = repo_root(Path(args.repo).resolve())
     if args.cmd == "inspect":
         inspect(repo)
-    elif args.cmd == "setup":
+    elif args.cmd in {"setup", "init"}:
         inspect(repo)
         print("\n--- Installing workflow ---")
         install(repo, force=args.force, agent_files=not args.no_agent_files)
@@ -783,6 +888,8 @@ def main() -> None:
         print_handoff(repo, args.id)
     elif args.cmd == "close":
         close(repo, args.id, args.status)
+    elif args.cmd == "guard":
+        guard(repo, args.id)
 
 
 if __name__ == "__main__":

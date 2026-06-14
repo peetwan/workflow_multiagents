@@ -81,6 +81,11 @@ Verification is repo-specific. Use local scripts if present, otherwise infer:
 Trading, deploy, database, billing, auth, and production paths need stronger
 checks and explicit user approval before merge/push.
 
+Always run `scripts/multiagent.py guard` from the main checkout before merging a
+parallel run. It compares every active task's actual worktree changes against its
+allowed paths and reports out-of-scope edits or collisions with another task's
+lane, so a straying agent is caught even if it ignored the Task Card.
+
 ## Merge Order
 
 When several agents finish together:

@@ -154,11 +154,11 @@ def main() -> int:
         # --- 3. mcp-config: print, codex, write ----------------------------
         print("\n[3] mcp-config registers the servers")
         pr = cli(repo, "mcp-config")
-        check("mcp-config print has multiagent + filesystem servers",
-              '"multiagent"' in pr.stdout and '"filesystem"' in pr.stdout and "serve-mcp" in pr.stdout, pr.stdout[:200])
+        check("mcp-config print has the multiagent + filesystem servers",
+              "multiagent-" in pr.stdout and '"filesystem"' in pr.stdout and "serve-mcp" in pr.stdout, pr.stdout[:200])
         cx = cli(repo, "mcp-config", "--codex")
         check("mcp-config --codex prints the Codex TOML",
-              "[mcp_servers.multiagent]" in cx.stdout, cx.stdout[:200])
+              "[mcp_servers.multiagent-" in cx.stdout, cx.stdout[:200])
 
         cfg = root / "claude_desktop_config.json"
         cfg.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}, indent=2), encoding="utf-8")
@@ -166,8 +166,9 @@ def main() -> int:
         check("mcp-config --write exits 0", w.returncode == 0, w.stderr)
         data = json.loads(cfg.read_text(encoding="utf-8"))
         srv = data.get("mcpServers", {})
-        check("multiagent server registered (serve-mcp)",
-              srv.get("multiagent", {}).get("args", [])[-1:] == ["serve-mcp"], str(srv.get("multiagent")))
+        ma_name = next((k for k in srv if k.startswith("multiagent-")), None)
+        check("per-repo multiagent server registered (serve-mcp)",
+              ma_name is not None and srv[ma_name].get("args", [])[-1:] == ["serve-mcp"], str(srv))
         check("filesystem server registered with both worktrees",
               str(Path(ta["worktreePath"]).resolve()) in srv.get("filesystem", {}).get("args", [])
               and str(Path(tb["worktreePath"]).resolve()) in srv.get("filesystem", {}).get("args", []), str(srv.get("filesystem")))

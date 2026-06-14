@@ -44,3 +44,6 @@ jobs:
 
       - name: MCP server + config test (serve-mcp, mcp-config)
         run: python multi-agent-workflow/tests/test_mcp.py
+
+      - name: MCP stability test (bad repo, garbage, mcp-check, multi-repo)
+        run: python multi-agent-workflow/tests/test_mcp_stability.py

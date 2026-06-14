@@ -121,6 +121,28 @@ its tools shell out to the same tested CLI, so the server's stdout stays pure
 protocol. `multiagent.py serve-mcp` is what the apps launch; you do not run it by
 hand.
 
+### Does it keep running? (reboots, app restarts)
+
+You do not run a daemon. Claude Desktop (and Codex) **launch** the stdio server
+themselves whenever the app starts, so it comes back automatically after a reboot
+or an app restart — as long as the config entry stays valid. For stability the
+entry uses an absolute Python path and the **repo-local** script, and each repo
+gets its own `multiagent-<repo>` server so several projects coexist without
+clobbering each other.
+
+To know it is working at any moment — e.g. right after a reboot — run:
+
+```powershell
+python scripts/multiagent.py mcp-check
+```
+
+It spawns the registered server, performs a real `initialize` + `tools/list`
+handshake **with a timeout** (a hung server is reported, never waited on), and
+prints `[OK]` per server or the exact failure. `mcp-config --write` runs that same
+check automatically after registering, and `doctor` includes a live MCP check in
+its readiness report. In the app itself, typing `/mcp` in a chat shows the live
+connection.
+
 ## Am I Ready? (doctor / selftest)
 
 Two commands answer "is this set up correctly?" with no guessing:
@@ -237,6 +259,7 @@ python scripts/multiagent.py dispatch --from tasks.txt   # batch; or one --strea
 python scripts/multiagent.py board                       # one-screen status of every agent
 python scripts/multiagent.py launch                      # how to open each worktree (CLI or desktop app)
 python scripts/multiagent.py mcp-config --write          # Claude Desktop/Codex: file access + task tools in a chat
+python scripts/multiagent.py mcp-check                   # is the MCP server alive? (run after a reboot)
 python scripts/multiagent.py guard                       # lane check (which files left their lane)
 python scripts/multiagent.py radar                       # files that two tasks both edited
 python scripts/multiagent.py land                        # read-only merge plan

@@ -626,6 +626,15 @@ def doctor(repo: Path) -> int:
     else:
         info(f"Claude Desktop config not found (only needed for Claude Desktop): {cdc}")
 
+    # 9. live check: does the MCP server actually launch and respond?
+    local = repo / "scripts" / "multiagent.py"
+    mscript = str(local.resolve()) if local.exists() else str(Path(__file__).resolve())
+    mok, mdetail = _mcp_handshake(sys.executable, [mscript, "--repo", str(repo), "serve-mcp"])
+    if mok:
+        ok(f"MCP server launches and responds ({mdetail})")
+    else:
+        rec(f"MCP server did not respond ({mdetail})", "python scripts/multiagent.py mcp-check")
+
     print("=" * 42)
     if counts["fatal"]:
         extra = f", {counts['warn']} recommendation(s)" if counts["warn"] else ""
@@ -1498,6 +1507,13 @@ def serve_mcp(repo: Path) -> None:
     same CLI in a subprocess, so the server's own stdout stays pure JSON-RPC (a
     hard requirement of the MCP stdio transport).
     """
+    # stdio hardening: force UTF-8 and never translate \n -> \r\n on Windows
+    # (the client frames each message on a single \n; stray bytes break it).
+    try:
+        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8", newline="")
+    except (AttributeError, ValueError, OSError):
+        pass
     script = Path(__file__).resolve()
 
     def reply(mid, result=None, error=None):
@@ -1547,40 +1563,45 @@ def serve_mcp(repo: Path) -> None:
             return card_for(m) if m else f"No active task owns '{p}'. Use list_tasks to see tasks."
         raise ValueError(f"unknown tool: {name}")
 
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    for raw in sys.stdin:
         try:
-            req = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        mid = req.get("id")
-        method = req.get("method")
-        if method == "initialize":
-            reply(mid, {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "multiagent-workflow", "version": "1"}})
-        elif method == "tools/list":
-            reply(mid, {"tools": MCP_TOOLS})
-        elif method == "tools/call":
-            params = req.get("params", {}) or {}
+            line = raw.strip()
+            if not line:
+                continue
             try:
-                text = call_tool(params.get("name"), params.get("arguments", {}) or {})
-                reply(mid, {"content": [{"type": "text", "text": text}]})
-            except Exception as exc:  # noqa: BLE001 - the server must never crash on a tool error
-                reply(mid, {"content": [{"type": "text", "text": f"error: {exc}"}], "isError": True})
-        elif method == "ping":
-            reply(mid, {})
-        elif mid is not None:
-            reply(mid, error={"code": -32601, "message": f"method not found: {method}"})
-        # notifications (no id) get no response
+                req = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            mid = req.get("id")
+            method = req.get("method")
+            if method == "initialize":
+                reply(mid, {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "multiagent-workflow", "version": "1"}})
+            elif method == "tools/list":
+                reply(mid, {"tools": MCP_TOOLS})
+            elif method == "tools/call":
+                params = req.get("params", {}) or {}
+                try:
+                    text = call_tool(params.get("name"), params.get("arguments", {}) or {})
+                    reply(mid, {"content": [{"type": "text", "text": text}]})
+                except Exception as exc:  # noqa: BLE001 - report tool errors, never crash
+                    reply(mid, {"content": [{"type": "text", "text": f"error: {exc}"}], "isError": True})
+            elif method == "ping":
+                reply(mid, {})
+            elif mid is not None:
+                reply(mid, error={"code": -32601, "message": f"method not found: {method}"})
+            # notifications (no id) get no response
+        except Exception:  # noqa: BLE001 - one bad message must never kill the server
+            continue
 
 
 def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool) -> None:
     """Register the workflow with MCP clients so desktop apps use it from a chat:
-    a 'filesystem' server (worktree file access) and a 'multiagent' server
-    (task-awareness). Prints the Claude Desktop JSON (or --write merges it) and,
-    with --codex, the Codex config.toml snippet."""
+    a shared 'filesystem' server (worktree file access) and a per-repo
+    'multiagent-<repo>' server (task-awareness, so several repos coexist). Prints
+    the Claude Desktop JSON, or --write merges AND verifies it; --codex prints
+    the Codex config.toml snippet."""
+    repo = Path(repo).resolve()
     dirs: list[str] = []
     for m in active_manifests(repo):
         wt = m.get("worktreePath", "")
@@ -1588,8 +1609,13 @@ def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool) ->
             rp = str(Path(wt).resolve())
             if rp not in dirs:
                 dirs.append(rp)
-    script = str(Path(__file__).resolve())
-    ma_args = [script, "--repo", str(Path(repo).resolve()), "serve-mcp"]
+    repo_name = re.sub(r"[^a-z0-9]+", "-", repo.name.lower()).strip("-") or "repo"
+    server_name = f"multiagent-{repo_name}"
+    local = repo / "scripts" / "multiagent.py"
+    # Prefer the repo-local copy: it travels with the project and stays valid
+    # across reboots even if the skill source moves.
+    script = str(local.resolve()) if local.exists() else str(Path(__file__).resolve())
+    ma_args = [script, "--repo", str(repo), "serve-mcp"]
     ma_server = {"command": sys.executable, "args": ma_args}
     fs_server = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", *dirs]}
 
@@ -1602,13 +1628,13 @@ def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool) ->
 
     if codex:
         print("# Codex: add to ~/.codex/config.toml (Codex supports stdio MCP servers):\n")
-        print("[mcp_servers.multiagent]")
+        print(f"[mcp_servers.{server_name}]")
         print(f"command = {json.dumps(sys.executable)}")
         print(f"args = {json.dumps(ma_args)}")
         print()
 
     target = Path(config_path) if config_path else claude_desktop_config_path()
-    new_servers = {"multiagent": ma_server}
+    new_servers = {server_name: ma_server}
     if dirs:
         new_servers["filesystem"] = fs_server
 
@@ -1616,7 +1642,7 @@ def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool) ->
         print("Add these servers to your Claude Desktop config, then restart Claude Desktop:\n")
         print(json.dumps({"mcpServers": new_servers}, indent=2))
         print(f"\nConfig file (this OS): {target}")
-        print("Or merge automatically with:  multiagent.py mcp-config --write")
+        print("Or merge + verify automatically with:  multiagent.py mcp-config --write")
         return
 
     data: dict[str, Any] = {}
@@ -1637,12 +1663,97 @@ def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool) ->
                     fs["args"].append(d)
         else:
             servers["filesystem"] = fs_server
-    servers["multiagent"] = ma_server
+    servers[server_name] = ma_server
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    print(f"Registered the multiagent MCP server" + (f" + filesystem ({len(dirs)} worktree(s))" if dirs else "")
-          + f" in {target}.")
-    print("Restart Claude Desktop, then in a chat ask: \"what are my multi-agent tasks?\"")
+    print(f"Registered '{server_name}'" + (f" + filesystem ({len(dirs)} worktree(s))" if dirs else "") + f" in {target}.")
+    ok, detail = _mcp_handshake(sys.executable, ma_args)
+    print(f"  health check: [{'OK' if ok else 'FAILED'}] {detail}")
+    if ok:
+        print("Restart Claude Desktop, then in a chat ask: \"what are my multi-agent tasks?\"")
+    else:
+        print("The server did not respond - fix the above and re-run: multiagent.py mcp-config --write")
+
+
+def _mcp_handshake(command, args, timeout=20):
+    """Spawn an MCP stdio server and do initialize + tools/list. Returns
+    (ok, detail). Uses a timeout so a hung server is reported, not waited on."""
+    reqs = (json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n"
+            + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n")
+    try:
+        proc = subprocess.run([command, *[str(a) for a in args]], input=reqs, text=True,
+                              capture_output=True, timeout=timeout)
+    except FileNotFoundError:
+        return False, f"command not found: {command}"
+    except subprocess.TimeoutExpired:
+        return False, f"timed out after {timeout}s (no response)"
+    except OSError as exc:
+        return False, f"could not start: {exc}"
+    name = None
+    tools = None
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            o = json.loads(line)
+        except json.JSONDecodeError:
+            return False, "server wrote non-JSON to stdout (stdout pollution)"
+        if o.get("id") == 1:
+            name = o.get("result", {}).get("serverInfo", {}).get("name")
+        elif o.get("id") == 2:
+            tools = o.get("result", {}).get("tools")
+    if name and tools is not None:
+        return True, f"{name}, {len(tools)} tools"
+    err = (proc.stderr or "").strip().splitlines()
+    return False, f"no handshake (exit {proc.returncode})" + (f"; {err[-1][:120]}" if err else "")
+
+
+def mcp_check(repo: Path, config_path: str | None, name: str | None) -> int:
+    """Live health check: spawn the registered MCP server(s) and confirm they
+    respond. Run it anytime (e.g. after a reboot or app restart) to know the
+    server still works. Returns 0 when all checked servers respond."""
+    target = Path(config_path) if config_path else claude_desktop_config_path()
+    print("MCP health check")
+    print("=" * 32)
+    servers = {}
+    if target.exists():
+        try:
+            servers = json.loads(target.read_text(encoding="utf-8")).get("mcpServers", {})
+        except json.JSONDecodeError:
+            print(f"  [X] config is not valid JSON: {target}")
+            return 1
+    if name:
+        items = [(name, servers[name])] if name in servers else []
+    else:
+        items = [(n, s) for n, s in servers.items() if n.startswith("multiagent")]
+    if not items:
+        local = repo / "scripts" / "multiagent.py"
+        script = str(local.resolve()) if local.exists() else str(Path(__file__).resolve())
+        print(f"  no registered multiagent server in {target};")
+        print("  checking the current repo's server directly:")
+        ok, detail = _mcp_handshake(sys.executable, [script, "--repo", str(Path(repo).resolve()), "serve-mcp"])
+        print(f"  [{'OK' if ok else 'X'}] current repo -> {detail}")
+        if ok:
+            print("  Register it for Claude Desktop with:  multiagent.py mcp-config --write")
+        return 0 if ok else 1
+    failed = 0
+    for n, s in items:
+        if not isinstance(s, dict) or not s.get("command"):
+            print(f"  [X] {n}: malformed entry")
+            failed += 1
+            continue
+        ok, detail = _mcp_handshake(s["command"], s.get("args", []))
+        print(f"  [{'OK' if ok else 'X'}] {n} -> {detail}")
+        if not ok:
+            failed += 1
+    print("=" * 32)
+    if failed:
+        print(f"  {failed}/{len(items)} server(s) FAILED. Re-run: multiagent.py mcp-config --write")
+        return 1
+    print(f"  All {len(items)} multiagent server(s) respond - working.")
+    print("  In Claude Desktop you can also type /mcp in a chat to see the live connection.")
+    return 0
 
 
 def land(repo: Path) -> None:
@@ -1792,6 +1903,9 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_p.add_argument("--config", help="Target config file (default: this OS's claude_desktop_config.json).")
     mcp_p.add_argument("--write", action="store_true", help="Merge into the target config file (a .bak backup is kept).")
     mcp_p.add_argument("--codex", action="store_true", help="Also print the Codex config.toml snippet.")
+    check_p = sub.add_parser("mcp-check", help="Live health check: spawn the registered MCP server(s) and confirm they respond.")
+    check_p.add_argument("--config", help="Config file to read servers from (default: claude_desktop_config.json).")
+    check_p.add_argument("--name", help="Check only this server name.")
     sub.add_parser("land", help="Print a read-only merge plan (order, overlaps, verify reminders).")
     return parser
 
@@ -1804,11 +1918,20 @@ def main() -> None:
         return
     if args.cmd == "selftest":
         raise SystemExit(selftest())
+    if args.cmd == "serve-mcp":
+        # Start the server even if the repo is unusual; tools report issues
+        # instead of the server failing to launch (so the client shows connected).
+        try:
+            base = main_checkout(repo_root(Path(args.repo).resolve()))
+        except SystemExit:
+            base = Path(args.repo).resolve()
+        serve_mcp(base)
+        return
     repo = repo_root(Path(args.repo).resolve())
     # Coordination/readiness commands read manifests from the main checkout;
     # resolve it so they also work when invoked from inside a worktree.
     if args.cmd in {"board", "radar", "cleanup", "land", "launch", "status", "desktop-config",
-                    "doctor", "ready", "serve-mcp", "mcp-config"}:
+                    "doctor", "ready", "mcp-config", "mcp-check"}:
         repo = main_checkout(repo)
     if args.cmd == "inspect":
         inspect(repo)
@@ -1853,10 +1976,10 @@ def main() -> None:
         launch(repo, args.id, args.do_open)
     elif args.cmd == "desktop-config":
         desktop_config(repo, args.config, args.write, args.server_name)
-    elif args.cmd == "serve-mcp":
-        serve_mcp(repo)
     elif args.cmd == "mcp-config":
         mcp_config(repo, args.config, args.write, args.codex)
+    elif args.cmd == "mcp-check":
+        raise SystemExit(mcp_check(repo, args.config, args.name))
     elif args.cmd == "land":
         land(repo)
 

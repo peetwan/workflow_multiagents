@@ -166,8 +166,9 @@ Ask before proceeding when:
   `doctor` (READY/NOT READY check), `selftest` (end-to-end proof), `examples`.
   Run: `dispatch` (incl.
   `--from` batch), `status`, `board` (`--watch`), `launch`, `mcp-config` /
-  `serve-mcp` (MCP servers so Claude Desktop / Codex use the workflow from a
-  chat), `desktop-config`, `handoff`. Safety: `guard` (and
+  `mcp-check` / `serve-mcp` (MCP servers + a live health check so Claude Desktop /
+  Codex use the workflow from a chat and you can confirm it after a reboot),
+  `desktop-config`, `handoff`. Safety: `guard` (and
   `guard --staged` for the pre-commit hook), `radar` (cross-task file overlap).
   Finish: `land` (merge plan), `close`, `cleanup`.
 - `tests/test_workflow.py`: end-to-end test on a throwaway repo proving universal
@@ -182,6 +183,8 @@ Ask before proceeding when:
 - `tests/test_readiness.py`: tests doctor (READY/NOT READY), ready, and selftest.
 - `tests/test_mcp.py`: drives the serve-mcp stdio server over JSON-RPC
   (initialize / tools/list / tools/call) and tests mcp-config registration.
+- `tests/test_mcp_stability.py`: server survives a bad repo and garbage input;
+  mcp-check reports OK/FAIL without hanging; per-repo servers coexist.
 - `tests/test_vs_baseline.py`: A/B test proving the workflow beats NOT using it.
   It reproduces the two failures of a shared working tree (one agent's commit
   sweeping in another's in-progress files; silent same-file clobber) and shows

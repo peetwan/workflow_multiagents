@@ -165,8 +165,9 @@ Ask before proceeding when:
   install + hooks + readiness), `init`/`setup`, `install`, `install-hooks`,
   `doctor` (READY/NOT READY check), `selftest` (end-to-end proof), `examples`.
   Run: `dispatch` (incl.
-  `--from` batch), `status`, `board` (`--watch`), `launch`, `desktop-config`
-  (Claude Desktop filesystem MCP), `handoff`. Safety: `guard` (and
+  `--from` batch), `status`, `board` (`--watch`), `launch`, `mcp-config` /
+  `serve-mcp` (MCP servers so Claude Desktop / Codex use the workflow from a
+  chat), `desktop-config`, `handoff`. Safety: `guard` (and
   `guard --staged` for the pre-commit hook), `radar` (cross-task file overlap).
   Finish: `land` (merge plan), `close`, `cleanup`.
 - `tests/test_workflow.py`: end-to-end test on a throwaway repo proving universal
@@ -177,8 +178,10 @@ Ask before proceeding when:
   `python tests/test_upgrade.py`.
 - `tests/test_desktop.py`: tests the desktop-app flow — claude-desktop/
   codex-desktop inference, desktop-aware launch output, and desktop-config
-  generating/merging the Claude Desktop filesystem config. Run
-  `python tests/test_desktop.py`.
+  generating/merging the Claude Desktop filesystem config.
+- `tests/test_readiness.py`: tests doctor (READY/NOT READY), ready, and selftest.
+- `tests/test_mcp.py`: drives the serve-mcp stdio server over JSON-RPC
+  (initialize / tools/list / tools/call) and tests mcp-config registration.
 - `tests/test_vs_baseline.py`: A/B test proving the workflow beats NOT using it.
   It reproduces the two failures of a shared working tree (one agent's commit
   sweeping in another's in-progress files; silent same-file clobber) and shows

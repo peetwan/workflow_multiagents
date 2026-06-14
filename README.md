@@ -89,11 +89,12 @@ so you cannot `cd` into a worktree. Name the agent so the type is clear
 (`claude-desktop`, `codex-desktop`) and `launch` prints the right steps instead
 of a useless `cd && claude`:
 
-- **Claude Desktop** reaches local files through a filesystem MCP server. Run
-  `python scripts/multiagent.py desktop-config --write` once — it adds every
-  active worktree to your `claude_desktop_config.json` (a `.bak` is kept). After
-  restarting Claude Desktop, open a chat and say *"Work on the current task in
-  .agents/current-task.md"* for the worktree that task owns.
+- **Claude Desktop** reaches local files through MCP servers. Run
+  `python scripts/multiagent.py mcp-config --write` once — it registers a
+  `filesystem` server (access to every worktree) **and** a `multiagent` server
+  (the workflow itself) in your `claude_desktop_config.json` (a `.bak` is kept).
+  After restarting Claude Desktop you can ask, in a normal chat, *"what are my
+  multi-agent tasks?"* and it reads them directly (see the MCP section below).
 - **Codex Desktop** opens a project pinned to a folder: start a new project whose
   working directory is the printed worktree path. (Codex Desktop has had
   out-of-project edits; the worktree plus the `install-hooks` guard contain the
@@ -101,8 +102,24 @@ of a useless `cd && claude`:
 - **Warp** is a terminal, so the CLI flow works: `cd` into the worktree and run
   Claude Code / Codex there.
 
-`launch` prints all of this per task; `desktop-config` prints (or `--write`
-merges) the Claude Desktop filesystem config for every worktree at once.
+`launch` prints all of this per task.
+
+## Seamless in a Chat: the multiagent MCP server
+
+`python scripts/multiagent.py mcp-config --write` registers two MCP servers in
+Claude Desktop: `filesystem` (file access to the worktrees) and `multiagent` (a
+tiny stdio server that exposes the workflow). After a restart you can ask, in a
+normal chat — **no terminal, no copy-paste** — things like *"what are my
+multi-agent tasks?"* or *"what should I work on in this folder?"*. Claude Desktop
+calls the MCP tools (`list_tasks`, `task_card`, `which_task`, `board`, `guard`,
+`radar`) and reads the Task Card itself. Add `--codex` to also print the
+`~/.codex/config.toml` block — Codex supports stdio MCP servers too, so the same
+server works there.
+
+The server is **dependency-free** (hand-rolled newline-delimited JSON-RPC) and
+its tools shell out to the same tested CLI, so the server's stdout stays pure
+protocol. `multiagent.py serve-mcp` is what the apps launch; you do not run it by
+hand.
 
 ## Am I Ready? (doctor / selftest)
 
@@ -219,7 +236,7 @@ python scripts/multiagent.py selftest                    # prove the whole path 
 python scripts/multiagent.py dispatch --from tasks.txt   # batch; or one --stream/--task/--agent per task
 python scripts/multiagent.py board                       # one-screen status of every agent
 python scripts/multiagent.py launch                      # how to open each worktree (CLI or desktop app)
-python scripts/multiagent.py desktop-config --write      # grant Claude Desktop access to every worktree
+python scripts/multiagent.py mcp-config --write          # Claude Desktop/Codex: file access + task tools in a chat
 python scripts/multiagent.py guard                       # lane check (which files left their lane)
 python scripts/multiagent.py radar                       # files that two tasks both edited
 python scripts/multiagent.py land                        # read-only merge plan

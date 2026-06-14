@@ -613,9 +613,14 @@ def doctor(repo: Path) -> int:
             granted = sum(1 for m in active if str(Path(m.get("worktreePath", "")).resolve()) in cfg_args)
             if active and granted < len(active):
                 rec(f"Claude Desktop config found, but only {granted}/{len(active)} worktree(s) granted",
-                    "python scripts/multiagent.py desktop-config --write   (then restart Claude Desktop)")
+                    "python scripts/multiagent.py mcp-config --write   (then restart Claude Desktop)")
             else:
                 ok(f"Claude Desktop config found ({granted} worktree(s) granted)")
+            if "multiagent" in data.get("mcpServers", {}):
+                ok("Claude Desktop has the 'multiagent' MCP server (task-aware in chat)")
+            elif active:
+                rec("Claude Desktop has no 'multiagent' MCP server (cannot read tasks from a chat)",
+                    "python scripts/multiagent.py mcp-config --write")
         except json.JSONDecodeError:
             rec(f"Claude Desktop config is not valid JSON ({cdc})", "fix or recreate the file")
     else:
@@ -1367,15 +1372,16 @@ def launch(repo: Path, task_id: str | None, do_open: bool) -> None:
         print(f"\n[{m.get('id')}] {m.get('stream')} -> {m.get('agent')} ({at})")
         if at == "claude-desktop":
             print("  Claude Desktop (chat app, not a terminal):")
-            print("    1. grant it filesystem access to this folder (run: multiagent.py desktop-config --write):")
-            print(f"         {wt}")
-            print("    2. open a NEW chat and say:")
-            print(f"         {say}   (the folder is {wt})")
+            print("    1. one-time:  multiagent.py mcp-config --write   (grants file access + task tools)")
+            print("    2. in a NEW chat, say:")
+            print(f"         {say}   (worktree: {wt})")
+            print("       or just ask:  'what should I work on in this worktree?'")
         elif at == "codex-desktop":
             print("  Codex Desktop (chat app, not a terminal):")
             print("    1. New project/thread -> set its working directory to:")
             print(f"         {wt}")
             print(f"    2. then say:  {say}")
+            print("       optional task tools:  multiagent.py mcp-config --codex  (add to ~/.codex/config.toml)")
         elif at in cli_cmd:
             print(f'  cd "{wt}" && {cli_cmd[at]}')
             print(f"  then say: {say}")
@@ -1389,7 +1395,8 @@ def launch(repo: Path, task_id: str | None, do_open: bool) -> None:
             opener = "explorer" if os.name == "nt" else ("open" if sys.platform == "darwin" else "xdg-open")
             run([opener, wt], check=False)
     if any(m.get("agentType") in {"claude-desktop", "codex-desktop"} for m in active):
-        print("\nFor Claude Desktop, run `multiagent.py desktop-config` once to grant it access to every worktree at once.")
+        print("\nSeamless: run `multiagent.py mcp-config --write` once. Then in Claude Desktop you can")
+        print("ask 'what are my multi-agent tasks?' and it reads them directly (no copy-paste).")
     if do_open:
         print("\nOpened each worktree folder in your file manager.")
 
@@ -1454,6 +1461,188 @@ def desktop_config(repo: Path, config_path: str | None, write: bool, server_name
     target.write_text(json.dumps(data, indent=2), encoding="utf-8")
     print(f"Granted Claude Desktop filesystem access to {len(dirs)} worktree(s) in {target}.")
     print("Restart Claude Desktop for it to take effect.")
+
+
+def _path_under(child, parent) -> bool:
+    try:
+        c = str(Path(child).resolve())
+        p = str(Path(parent).resolve())
+    except OSError:
+        c, p = str(child), str(parent)
+    c = os.path.normcase(c)
+    p = os.path.normcase(p)
+    return bool(p) and (c == p or c.startswith(p + os.sep))
+
+
+MCP_TOOLS = [
+    {"name": "list_tasks", "description": "List active multi-agent tasks (id, stream, agent, worktree, branch).",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "task_card", "description": "Get the Task Card (what to do + allowed paths) for a task id, or the newest task if no id is given.",
+     "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}}},
+    {"name": "which_task", "description": "Given a folder path, return which task owns that worktree and its Task Card.",
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+    {"name": "board", "description": "One-screen status of every active task (dirty/ahead/behind + guard state).",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "guard", "description": "Check that tasks only changed files inside their allowed paths (anti-collision).",
+     "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}}},
+    {"name": "radar", "description": "List files edited by more than one active task (merge-conflict risk).",
+     "inputSchema": {"type": "object", "properties": {}}},
+]
+
+
+def serve_mcp(repo: Path) -> None:
+    """A minimal, dependency-free MCP server (stdio, newline-delimited JSON-RPC).
+
+    Lets MCP clients (Claude Desktop, Codex) use the workflow from a chat: list
+    tasks, read a Task Card, run guard/radar/board. Tool bodies shell out to this
+    same CLI in a subprocess, so the server's own stdout stays pure JSON-RPC (a
+    hard requirement of the MCP stdio transport).
+    """
+    script = Path(__file__).resolve()
+
+    def reply(mid, result=None, error=None):
+        msg = {"jsonrpc": "2.0", "id": mid}
+        if error is not None:
+            msg["error"] = error
+        else:
+            msg["result"] = result
+        sys.stdout.write(json.dumps(msg) + "\n")
+        sys.stdout.flush()
+
+    def run_cmd(*args):
+        proc = run([sys.executable, str(script), "--repo", str(repo), *args], check=False)
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        return (out + ("\n" + err if err else "")).strip() or "(no output)"
+
+    def card_for(m):
+        head = (f"Task: {m.get('id')}  [{m.get('stream')}]  agent={m.get('agent')} ({m.get('agentType', 'generic')})\n"
+                f"Worktree: {m.get('worktreePath')}\n"
+                f"Allowed paths: {', '.join(m.get('paths', [])) or '(stream default)'}\n\n")
+        for key in ("taskCardPath", "handoffPath"):
+            val = m.get(key)
+            if val and Path(val).exists():
+                return head + Path(val).read_text(encoding="utf-8")
+        return head + "(Task Card file not found; work only inside the allowed paths above.)"
+
+    def call_tool(name, a):
+        if name == "list_tasks":
+            return run_cmd("status")
+        if name == "board":
+            return run_cmd("board")
+        if name == "radar":
+            return run_cmd("radar")
+        if name == "guard":
+            tid = a.get("task_id")
+            return run_cmd("guard", *(["--id", tid] if tid else []))
+        if name == "task_card":
+            ms = active_manifests(repo)
+            tid = a.get("task_id")
+            m = (next((x for x in ms if x.get("id") == tid), None) if tid
+                 else (sorted(ms, key=lambda x: x.get("createdAt", ""))[-1] if ms else None))
+            return card_for(m) if m else "No matching active task. Use list_tasks."
+        if name == "which_task":
+            p = a.get("path", "")
+            m = next((x for x in active_manifests(repo) if _path_under(p, x.get("worktreePath", ""))), None)
+            return card_for(m) if m else f"No active task owns '{p}'. Use list_tasks to see tasks."
+        raise ValueError(f"unknown tool: {name}")
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        mid = req.get("id")
+        method = req.get("method")
+        if method == "initialize":
+            reply(mid, {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "multiagent-workflow", "version": "1"}})
+        elif method == "tools/list":
+            reply(mid, {"tools": MCP_TOOLS})
+        elif method == "tools/call":
+            params = req.get("params", {}) or {}
+            try:
+                text = call_tool(params.get("name"), params.get("arguments", {}) or {})
+                reply(mid, {"content": [{"type": "text", "text": text}]})
+            except Exception as exc:  # noqa: BLE001 - the server must never crash on a tool error
+                reply(mid, {"content": [{"type": "text", "text": f"error: {exc}"}], "isError": True})
+        elif method == "ping":
+            reply(mid, {})
+        elif mid is not None:
+            reply(mid, error={"code": -32601, "message": f"method not found: {method}"})
+        # notifications (no id) get no response
+
+
+def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool) -> None:
+    """Register the workflow with MCP clients so desktop apps use it from a chat:
+    a 'filesystem' server (worktree file access) and a 'multiagent' server
+    (task-awareness). Prints the Claude Desktop JSON (or --write merges it) and,
+    with --codex, the Codex config.toml snippet."""
+    dirs: list[str] = []
+    for m in active_manifests(repo):
+        wt = m.get("worktreePath", "")
+        if wt and Path(wt).exists():
+            rp = str(Path(wt).resolve())
+            if rp not in dirs:
+                dirs.append(rp)
+    script = str(Path(__file__).resolve())
+    ma_args = [script, "--repo", str(Path(repo).resolve()), "serve-mcp"]
+    ma_server = {"command": sys.executable, "args": ma_args}
+    fs_server = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", *dirs]}
+
+    spaced = [d for d in dirs if " " in d]
+    if spaced:
+        print("Warning: worktree paths contain spaces, which the filesystem MCP server cannot handle:")
+        for d in spaced:
+            print(f"  {d}")
+        print()
+
+    if codex:
+        print("# Codex: add to ~/.codex/config.toml (Codex supports stdio MCP servers):\n")
+        print("[mcp_servers.multiagent]")
+        print(f"command = {json.dumps(sys.executable)}")
+        print(f"args = {json.dumps(ma_args)}")
+        print()
+
+    target = Path(config_path) if config_path else claude_desktop_config_path()
+    new_servers = {"multiagent": ma_server}
+    if dirs:
+        new_servers["filesystem"] = fs_server
+
+    if not write:
+        print("Add these servers to your Claude Desktop config, then restart Claude Desktop:\n")
+        print(json.dumps({"mcpServers": new_servers}, indent=2))
+        print(f"\nConfig file (this OS): {target}")
+        print("Or merge automatically with:  multiagent.py mcp-config --write")
+        return
+
+    data: dict[str, Any] = {}
+    if target.exists():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raise SystemExit(f"Existing config is not valid JSON: {target}")
+        backup = target.with_suffix(target.suffix + ".bak")
+        shutil.copy2(target, backup)
+        print(f"Backed up existing config to {backup}")
+    servers = data.setdefault("mcpServers", {})
+    if dirs:
+        fs = servers.get("filesystem")
+        if isinstance(fs, dict) and isinstance(fs.get("args"), list):
+            for d in dirs:
+                if d not in fs["args"]:
+                    fs["args"].append(d)
+        else:
+            servers["filesystem"] = fs_server
+    servers["multiagent"] = ma_server
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    print(f"Registered the multiagent MCP server" + (f" + filesystem ({len(dirs)} worktree(s))" if dirs else "")
+          + f" in {target}.")
+    print("Restart Claude Desktop, then in a chat ask: \"what are my multi-agent tasks?\"")
 
 
 def land(repo: Path) -> None:
@@ -1598,6 +1787,11 @@ def build_parser() -> argparse.ArgumentParser:
     dc_p.add_argument("--config", help="Target config file (default: this OS's claude_desktop_config.json).")
     dc_p.add_argument("--write", action="store_true", help="Merge into the target config file (a .bak backup is kept).")
     dc_p.add_argument("--server-name", default="filesystem")
+    sub.add_parser("serve-mcp", help="Run as an MCP server (stdio) so Claude Desktop / Codex can use the workflow from a chat.")
+    mcp_p = sub.add_parser("mcp-config", help="Register the workflow as MCP servers (filesystem + multiagent) for Claude Desktop / Codex.")
+    mcp_p.add_argument("--config", help="Target config file (default: this OS's claude_desktop_config.json).")
+    mcp_p.add_argument("--write", action="store_true", help="Merge into the target config file (a .bak backup is kept).")
+    mcp_p.add_argument("--codex", action="store_true", help="Also print the Codex config.toml snippet.")
     sub.add_parser("land", help="Print a read-only merge plan (order, overlaps, verify reminders).")
     return parser
 
@@ -1613,7 +1807,8 @@ def main() -> None:
     repo = repo_root(Path(args.repo).resolve())
     # Coordination/readiness commands read manifests from the main checkout;
     # resolve it so they also work when invoked from inside a worktree.
-    if args.cmd in {"board", "radar", "cleanup", "land", "launch", "status", "desktop-config", "doctor", "ready"}:
+    if args.cmd in {"board", "radar", "cleanup", "land", "launch", "status", "desktop-config",
+                    "doctor", "ready", "serve-mcp", "mcp-config"}:
         repo = main_checkout(repo)
     if args.cmd == "inspect":
         inspect(repo)
@@ -1658,6 +1853,10 @@ def main() -> None:
         launch(repo, args.id, args.do_open)
     elif args.cmd == "desktop-config":
         desktop_config(repo, args.config, args.write, args.server_name)
+    elif args.cmd == "serve-mcp":
+        serve_mcp(repo)
+    elif args.cmd == "mcp-config":
+        mcp_config(repo, args.config, args.write, args.codex)
     elif args.cmd == "land":
         land(repo)
 

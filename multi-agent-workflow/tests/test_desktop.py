@@ -98,15 +98,15 @@ def main() -> int:
         print("\n[2] launch gives desktop-app steps")
         lc = cli(repo, "launch")
         check("launch exits 0", lc.returncode == 0, lc.stderr)
-        check("Claude Desktop section mentions filesystem access",
-              "Claude Desktop" in lc.stdout and "filesystem access" in lc.stdout, lc.stdout)
+        check("Claude Desktop section points to the mcp-config setup",
+              "Claude Desktop" in lc.stdout and "mcp-config" in lc.stdout, lc.stdout)
         check("Codex Desktop section mentions working directory",
               "Codex Desktop" in lc.stdout and "working directory" in lc.stdout, lc.stdout)
         check("launch shows both worktree folders",
               man["claude-desktop-a"]["id"] in lc.stdout and man["codex-desktop-b"]["id"] in lc.stdout, lc.stdout)
         check("launch does NOT tell a desktop app to run a CLI",
               "&& claude" not in lc.stdout and "&& codex" not in lc.stdout, lc.stdout)
-        check("launch points to desktop-config", "desktop-config" in lc.stdout, lc.stdout)
+        check("launch points to mcp-config (seamless setup)", "mcp-config" in lc.stdout, lc.stdout)
 
         # --- 3. desktop-config prints a valid filesystem-MCP snippet --------
         print("\n[3] desktop-config (print mode)")

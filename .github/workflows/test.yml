@@ -41,3 +41,6 @@ jobs:
 
       - name: Readiness flow test (doctor, ready, selftest)
         run: python multi-agent-workflow/tests/test_readiness.py
+
+      - name: MCP server + config test (serve-mcp, mcp-config)
+        run: python multi-agent-workflow/tests/test_mcp.py

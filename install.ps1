@@ -26,8 +26,9 @@ if (-not $py) {
   exit 1
 }
 
-New-Item -ItemType Directory -Force -Path "$root\scripts" | Out-Null
-$dest = "$root\scripts\multiagent.py"
+$scriptsDir = Join-Path $root "scripts"
+New-Item -ItemType Directory -Force -Path $scriptsDir | Out-Null
+$dest = Join-Path $scriptsDir "multiagent.py"
 
 if ($env:MAW_SOURCE -and (Test-Path $env:MAW_SOURCE)) {
   Write-Host "Installing multiagent.py from $($env:MAW_SOURCE) ..."

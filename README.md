@@ -148,7 +148,14 @@ multi-agent-workflow/
     user-prompts.md
   scripts/
     multiagent.py
+  tests/
+    test_workflow.py
+    test_vs_baseline.py
+    test_upgrade.py
 ```
+
+Both test suites and the upgrade-command tests run in CI (Ubuntu/macOS/Windows)
+on every push — see `.github/workflows/test.yml`.
 
 ## Portable CLI
 
@@ -162,16 +169,19 @@ python multi-agent-workflow/scripts/multiagent.py --repo C:\path\to\repo setup
 After setup, use the repo-local copy:
 
 ```powershell
-python scripts/multiagent.py setup
-python scripts/multiagent.py doctor
-python scripts/multiagent.py status
-python scripts/multiagent.py dispatch --stream frontend --task "nav polish" --agent claude-a --agent-type claude --paths "src/Nav.tsx"
-python scripts/multiagent.py dispatch --stream tests --task "edge cases" --agent qwen-a --agent-type qwen --paths "tests/"
-python scripts/multiagent.py guard
+python scripts/multiagent.py init                        # setup (alias) + auto-detect streams
+python scripts/multiagent.py install-hooks               # block out-of-lane commits in real time
+python scripts/multiagent.py dispatch --from tasks.txt   # batch; or one --stream/--task/--agent per task
+python scripts/multiagent.py board                       # one-screen status of every agent
+python scripts/multiagent.py launch                      # print the open command per program
+python scripts/multiagent.py guard                       # lane check (which files left their lane)
+python scripts/multiagent.py radar                       # files that two tasks both edited
+python scripts/multiagent.py land                        # read-only merge plan
+python scripts/multiagent.py cleanup                     # remove finished worktrees + branches
 ```
 
-`setup` has an `init` alias. `guard` verifies, before merge, that each agent
-only touched files inside its allowed paths.
+`init` auto-detects streams; `install-hooks` enforces lanes at commit time;
+`guard`/`radar`/`land` are the pre-merge checks; `cleanup` tidies up after.
 
 Supported `--agent-type` values:
 
@@ -216,9 +226,12 @@ Runtime files are ignored by git:
 - Use one branch and one worktree per task.
 - Use narrow path ownership whenever agents run in parallel.
 - Block overlapping active task manifests at dispatch time.
-- Run `multiagent.py guard` before merge to catch any agent that edited outside
-  its allowed paths or collided with another task's lane — verifiable, not just a
-  written rule.
+- Run `install-hooks` once so a pre-commit hook **blocks** any out-of-lane commit
+  at commit time (override with `git commit --no-verify`) — enforcement, not just
+  a written rule.
+- Run `multiagent.py guard` / `radar` before merge to catch any file edited
+  outside its lane or touched by two tasks — verifiable, after the fact.
+- Use `board` to watch every agent's status and guard state on one screen.
 - Keep the main checkout for coordination and integration.
 - Ask before touching protected/parked paths or production-deploy branches.
 

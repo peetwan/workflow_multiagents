@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 from typing import Any
 
@@ -783,6 +785,59 @@ def worktree_changes(worktree: Path, base: str) -> list[str]:
     return sorted(f for f in files if not _is_runtime_artifact(f))
 
 
+def active_manifests(repo: Path) -> list[dict[str, Any]]:
+    return [m for m in load_manifests(repo) if m.get("status", "active") not in {"closed", "merged"}]
+
+
+def _owners(active: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    owners: list[tuple[str, str, str]] = []
+    for m in active:
+        for p in m.get("paths", []):
+            owners.append((norm_path(p), m.get("id", ""), m.get("agent", "")))
+    return owners
+
+
+def _violations_for(changed, allowed, owners, task_id):
+    """Return [(kind, file, owner_label)] for files outside allowed paths."""
+    out = []
+    for f in changed:
+        nf = norm_path(f)
+        if any(overlaps(nf, a) for a in allowed):
+            continue
+        collide = next((o for o in owners if o[1] != task_id and overlaps(nf, o[0])), None)
+        if collide:
+            out.append(("COLLISION", f, f"{collide[1]} ({collide[2]})"))
+        else:
+            out.append(("OUT-OF-SCOPE", f, ""))
+    return out
+
+
+def main_checkout(start: Path) -> Path:
+    """Resolve the main working tree from anywhere, including inside a worktree."""
+    proc = run(["git", "-C", str(start), "rev-parse", "--git-common-dir"], check=False)
+    common = proc.stdout.strip()
+    if not common:
+        return repo_root(start)
+    cp = Path(common)
+    if not cp.is_absolute():
+        cp = (Path(start) / common).resolve()
+    return cp.parent.resolve()
+
+
+def _same_path(a, b) -> bool:
+    try:
+        ra, rb = Path(a).resolve(), Path(b).resolve()
+    except OSError:
+        ra, rb = Path(a), Path(b)
+    return os.path.normcase(str(ra)) == os.path.normcase(str(rb))
+
+
+def staged_files(worktree: Path) -> list[str]:
+    proc = git(worktree, "diff", "--cached", "--name-only", check=False)
+    files = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return [f for f in files if not _is_runtime_artifact(f)]
+
+
 def guard(repo: Path, task_id: str | None) -> None:
     """Verify each active task only changed files inside its allowed paths.
 
@@ -791,7 +846,7 @@ def guard(repo: Path, task_id: str | None) -> None:
     path owned by another active task is flagged as a COLLISION. Run it from the
     main checkout. Exits non-zero when any violation is found.
     """
-    active = [m for m in load_manifests(repo) if m.get("status", "active") not in {"closed", "merged"}]
+    active = active_manifests(repo)
     if task_id:
         targets = [m for m in active if m.get("id") == task_id]
         if not targets:
@@ -803,11 +858,7 @@ def guard(repo: Path, task_id: str | None) -> None:
         print("No active tasks to guard.")
         return
 
-    owners = []
-    for m in active:
-        for p in m.get("paths", []):
-            owners.append((norm_path(p), m.get("id", ""), m.get("agent", "")))
-
+    owners = _owners(active)
     violations = 0
     for m in targets:
         task = m.get("id", "")
@@ -822,21 +873,12 @@ def guard(repo: Path, task_id: str | None) -> None:
         if not changed:
             print("  clean: no changes vs base")
             continue
-        task_violations = []
-        for f in changed:
-            nf = norm_path(f)
-            if any(overlaps(nf, a) for a in allowed):
-                continue
-            collide = next((o for o in owners if o[1] != task and overlaps(nf, o[0])), None)
-            if collide:
-                task_violations.append(f"  COLLISION    {f}  -> owned by {collide[1]} ({collide[2]})")
-            else:
-                task_violations.append(f"  OUT-OF-SCOPE {f}  (outside allowed paths)")
-        if task_violations:
-            violations += len(task_violations)
-            print(f"  {len(changed)} changed file(s), {len(task_violations)} violation(s):")
-            for v in task_violations:
-                print(v)
+        bad = _violations_for(changed, allowed, owners, task)
+        if bad:
+            violations += len(bad)
+            print(f"  {len(changed)} changed file(s), {len(bad)} violation(s):")
+            for kind, f, owner in bad:
+                print(f"  {kind:<12} {f}" + (f"  -> owned by {owner}" if owner else "  (outside allowed paths)"))
         else:
             print(f"  OK: all {len(changed)} changed file(s) inside allowed paths")
 
@@ -846,6 +888,320 @@ def guard(repo: Path, task_id: str | None) -> None:
             "Move the work into the owning task's worktree before merge."
         )
     print("\nGuard passed: every task stayed inside its allowed paths.")
+
+
+def guard_staged(start: Path) -> None:
+    """Pre-commit guard: block staged changes outside the current worktree's lane.
+
+    Exits 3 on a real violation so a hook can fail-open on any other error.
+    Passes silently when the commit is not inside a known task worktree.
+    """
+    wt = repo_root(start)
+    main = main_checkout(start)
+    active = active_manifests(main)
+    me = next((m for m in active if _same_path(m.get("worktreePath", ""), wt)), None)
+    if me is None:
+        return
+    allowed = [norm_path(p) for p in me.get("paths", [])]
+    bad = _violations_for(staged_files(wt), allowed, _owners(active), me.get("id", ""))
+    if not bad:
+        return
+    print(f"multi-agent guard: commit blocked for task {me.get('id')} [{me.get('stream')}]")
+    for kind, f, owner in bad:
+        print(f"  {kind:<12} {f}" + (f"  -> owned by {owner}" if owner else ""))
+    print("  Move these into the owning task's worktree, or override with: git commit --no-verify")
+    raise SystemExit(3)
+
+
+HOOK_MARKER = "# >>> multi-agent-workflow guard >>>"
+
+
+def _hooks_dir(repo: Path) -> Path:
+    hp = git(repo, "config", "--get", "core.hooksPath", check=False).stdout.strip()
+    if hp:
+        p = Path(hp)
+        return p if p.is_absolute() else (repo / hp).resolve()
+    common = run(["git", "-C", str(repo), "rev-parse", "--git-common-dir"], check=False).stdout.strip() or ".git"
+    cp = Path(common)
+    if not cp.is_absolute():
+        cp = (repo / common).resolve()
+    return cp / "hooks"
+
+
+def install_hooks(repo: Path) -> None:
+    main = main_checkout(repo)
+    script = (main / "scripts" / "multiagent.py").resolve()
+    if not script.exists():
+        script = Path(__file__).resolve()
+    hooks = _hooks_dir(main)
+    hooks.mkdir(parents=True, exist_ok=True)
+    pre = hooks / "pre-commit"
+    chain = ""
+    if pre.exists():
+        existing = pre.read_text(encoding="utf-8", errors="replace")
+        if HOOK_MARKER not in existing:
+            backup = hooks / "pre-commit.local"
+            if not backup.exists():
+                shutil.copy2(pre, backup)
+                try:
+                    os.chmod(backup, 0o755)
+                except OSError:
+                    pass
+            chain = '[ -x "$DIR/pre-commit.local" ] && "$DIR/pre-commit.local" "$@" || true\n'
+    body = (
+        "#!/bin/sh\n"
+        f"{HOOK_MARKER}\n"
+        "# Auto-installed by multi-agent-workflow. Blocks commits that stray outside a task lane.\n"
+        'DIR="$(dirname "$0")"\n'
+        f"{chain}"
+        'PY="$(command -v python 2>/dev/null || command -v python3 2>/dev/null)"\n'
+        '[ -n "$PY" ] || exit 0\n'
+        f'SCRIPT="{script.as_posix()}"\n'
+        '[ -f "$SCRIPT" ] || exit 0\n'
+        '"$PY" "$SCRIPT" --repo "." guard --staged\n'
+        "rc=$?\n"
+        '[ "$rc" -eq 3 ] && { echo "(commit blocked by multi-agent guard; use --no-verify to override)"; exit 1; }\n'
+        "exit 0\n"
+        "# <<< multi-agent-workflow guard <<<\n"
+    )
+    pre.write_text(body, encoding="utf-8")
+    try:
+        os.chmod(pre, 0o755)
+    except OSError:
+        pass
+    print(f"Installed pre-commit guard hook: {pre}")
+    if chain:
+        print("Chained your existing pre-commit (saved as pre-commit.local).")
+    print("Every worktree commit now runs guard --staged. Override a block with: git commit --no-verify")
+
+
+def cleanup(repo: Path, task_id: str | None, force: bool) -> None:
+    manifests = load_manifests(repo)
+    if task_id:
+        targets = [m for m in manifests if m.get("id") == task_id]
+        if not targets:
+            raise SystemExit(f"No manifest for id '{task_id}'.")
+    else:
+        targets = [m for m in manifests if m.get("status") in {"closed", "merged"}]
+    if not targets:
+        print("Nothing to clean up. Close a finished task first: multiagent.py close --id <id>")
+        return
+    for m in targets:
+        wt = Path(m.get("worktreePath", ""))
+        branch = m.get("branch", "")
+        tid = m.get("id", "")
+        print(f"\n== {tid} [{m.get('stream')}] {m.get('agent')}")
+        if wt.exists():
+            dirty = git(wt, "status", "--porcelain", check=False).stdout.strip()
+            if dirty and not force:
+                print(f"  ! worktree is dirty, skipping (use --force): {wt}")
+                continue
+            r = git(repo, "worktree", "remove", *(["--force"] if force else []), str(wt), check=False)
+            print("  removed worktree" if r.returncode == 0 else f"  ! worktree remove failed: {r.stderr.strip()}")
+        else:
+            git(repo, "worktree", "prune", check=False)
+            print("  worktree already gone (pruned)")
+        if branch:
+            r = git(repo, "branch", "-D" if force else "-d", branch, check=False)
+            print(f"  deleted branch {branch}" if r.returncode == 0
+                  else f"  ! branch kept ({r.stderr.strip() or 'not merged; use --force'})")
+        mp = task_root(repo) / f"{tid}.json"
+        if mp.exists():
+            mp.unlink()
+            print("  removed manifest")
+    print("\nCleanup done.")
+
+
+def _ahead_behind(worktree: Path, base: str) -> tuple[int, int]:
+    r = git(worktree, "rev-list", "--left-right", "--count", f"{base}...HEAD", check=False)
+    parts = r.stdout.split()
+    if r.returncode == 0 and len(parts) == 2:
+        try:
+            return int(parts[1]), int(parts[0])  # (ahead, behind)
+        except ValueError:
+            return 0, 0
+    return 0, 0
+
+
+def _render_board(repo: Path) -> tuple[str, int]:
+    active = active_manifests(repo)
+    owners = _owners(active)
+    lines = [f"{'TASK':<34} {'STREAM':<14} {'AGENT':<10} {'STATE':<16} GUARD", "-" * 86]
+    total = 0
+    if not active:
+        lines.append("(no active tasks)")
+    for m in active:
+        wt = Path(m.get("worktreePath", ""))
+        tid = (m.get("id", "") or "")[:33]
+        stream = (m.get("stream", "") or "")[:13]
+        agent = (m.get("agent", "") or "")[:9]
+        if not wt.exists():
+            state, gtxt = "missing", "-"
+        else:
+            dirty = [l for l in git(wt, "status", "--porcelain", check=False).stdout.splitlines() if l.strip()]
+            ahead, behind = _ahead_behind(wt, m.get("base", "main"))
+            bits = []
+            if dirty:
+                bits.append(f"{len(dirty)} dirty")
+            if ahead:
+                bits.append(f"+{ahead}")
+            if behind:
+                bits.append(f"-{behind}")
+            state = ", ".join(bits) if bits else "clean"
+            allowed = [norm_path(p) for p in m.get("paths", [])]
+            v = _violations_for(worktree_changes(wt, m.get("base", "main")), allowed, owners, tid)
+            total += len(v)
+            gtxt = "ok" if not v else f"{len(v)} VIOLATION"
+        lines.append(f"{tid:<34} {stream:<14} {agent:<10} {state[:16]:<16} {gtxt}")
+    lines.append("")
+    lines.append(f"{len(active)} active task(s), {total} guard violation(s).")
+    return "\n".join(lines), total
+
+
+def board(repo: Path, once: bool = True) -> int:
+    if once:
+        text, viol = _render_board(repo)
+        print(text)
+        return 1 if viol else 0
+    try:
+        while True:
+            os.system("cls" if os.name == "nt" else "clear")
+            text, _ = _render_board(repo)
+            print(text)
+            print("\n(board --watch; Ctrl-C to exit)")
+            time.sleep(2)
+    except KeyboardInterrupt:
+        return 0
+
+
+def radar(repo: Path) -> None:
+    active = active_manifests(repo)
+    by_file: dict[str, list[tuple[str, str]]] = {}
+    for m in active:
+        wt = Path(m.get("worktreePath", ""))
+        if not wt.exists():
+            continue
+        for f in worktree_changes(wt, m.get("base", "main")):
+            by_file.setdefault(norm_path(f), []).append((m.get("id", ""), m.get("agent", "")))
+    clashes = {f: ow for f, ow in by_file.items() if len({o[0] for o in ow}) > 1}
+    if not clashes:
+        print("Radar: no file is edited by more than one active task. Safe to merge in any order.")
+        return
+    print("Radar: files edited by MORE THAN ONE active task (these WILL conflict at merge):")
+    for f, ow in sorted(clashes.items()):
+        print(f"  {f}  <- " + ", ".join(f"{i} ({a})" for i, a in ow))
+    raise SystemExit(2)
+
+
+def launch(repo: Path, task_id: str | None, do_open: bool) -> None:
+    active = active_manifests(repo)
+    if task_id:
+        active = [m for m in active if m.get("id") == task_id]
+        if not active:
+            raise SystemExit(f"No active task for id '{task_id}'.")
+    if not active:
+        print("No active tasks.")
+        return
+    cli_cmd = {"claude": "claude", "codex": "codex", "gemini": "gemini", "qwen": "qwen"}
+    for m in active:
+        wt = m.get("worktreePath", "")
+        at = m.get("agentType", "generic")
+        print(f"\n[{m.get('id')}] {m.get('stream')} -> {m.get('agent')} ({at})")
+        if at in cli_cmd:
+            print(f'  cd "{wt}" && {cli_cmd[at]}')
+        elif at == "warp":
+            print(f"  open a new Warp tab in:  {wt}")
+        else:
+            print(f'  cd "{wt}"   # then start your agent here')
+        print("  then say: Work on the current task in .agents/current-task.md")
+        if do_open:
+            opener = "explorer" if os.name == "nt" else ("open" if sys.platform == "darwin" else "xdg-open")
+            run([opener, wt], check=False)
+    if do_open:
+        print("\nOpened each worktree folder in your file manager.")
+
+
+def land(repo: Path) -> None:
+    active = active_manifests(repo)
+    if not active:
+        print("No active tasks to land.")
+        return
+    by_file: dict[str, list[str]] = {}
+    for m in active:
+        wt = Path(m.get("worktreePath", ""))
+        if not wt.exists():
+            continue
+        for f in worktree_changes(wt, m.get("base", "main")):
+            by_file.setdefault(norm_path(f), []).append(m.get("id", ""))
+    clashes = {f: ids for f, ids in by_file.items() if len(set(ids)) > 1}
+
+    def clash_count(m):
+        return sum(1 for ids in clashes.values() if m.get("id", "") in ids)
+
+    ordered = sorted(active, key=lambda m: (clash_count(m), m.get("stream", "")))
+    print("Merge plan (read-only; nothing is merged automatically):\n")
+    for i, m in enumerate(ordered, 1):
+        base = m.get("base", "main")
+        br = m.get("branch", "")
+        flag = "   <- shares files with another task" if clash_count(m) else ""
+        print(f"{i}. {m.get('id')} [{m.get('stream')}]{flag}")
+        print(f"     verify, then:  git checkout {base} && git merge --no-ff {br}")
+    if clashes:
+        print("\n! Overlapping files (merge these one at a time and resolve by hand):")
+        for f, ids in sorted(clashes.items()):
+            print(f"   {f}  <- " + ", ".join(sorted(set(ids))))
+    print("\nAfter each merge, rebase the remaining worktrees and re-run guard + radar.")
+
+
+def parse_task_file(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise SystemExit(f"Task file not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        data = json.loads(text)
+        return [
+            {
+                "stream": d["stream"],
+                "agent": d["agent"],
+                "task": d["task"],
+                "agent_type": d.get("agentType") or d.get("agent_type"),
+                "paths": d.get("paths"),
+            }
+            for d in data
+        ]
+    out: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3:
+            continue
+        paths = None
+        if len(parts) > 3 and parts[3]:
+            paths = [p.strip() for p in parts[3].split(",") if p.strip()]
+        out.append({"stream": parts[0], "agent": parts[1], "task": parts[2], "agent_type": None, "paths": paths})
+    return out
+
+
+def dispatch_from(repo: Path, path: Path, base, no_fetch, force) -> None:
+    tasks = parse_task_file(path)
+    if not tasks:
+        raise SystemExit(f"No tasks found in {path}")
+    print(f"Batch-dispatching {len(tasks)} task(s) from {path.name}:")
+    ok = 0
+    for t in tasks:
+        ns = argparse.Namespace(
+            stream=t["stream"], task=t["task"], agent=t["agent"],
+            agent_type=t.get("agent_type"), paths=t.get("paths"),
+            base=base, no_fetch=no_fetch, force=force, print_handoff=False,
+        )
+        try:
+            dispatch(ns, repo)
+            ok += 1
+        except SystemExit as exc:
+            print(f"  ! skipped {t.get('agent')}/{t.get('task')}: {exc}")
+    print(f"\nBatch done: {ok}/{len(tasks)} dispatched.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -867,11 +1223,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("examples", help="Show simple user commands and CLI examples.")
 
     dispatch_p = sub.add_parser("dispatch")
-    dispatch_p.add_argument("--stream", required=True)
-    dispatch_p.add_argument("--task", required=True)
-    dispatch_p.add_argument("--agent", required=True)
+    dispatch_p.add_argument("--stream")
+    dispatch_p.add_argument("--task")
+    dispatch_p.add_argument("--agent")
     dispatch_p.add_argument("--agent-type", default=None, choices=sorted(AGENT_TYPE_NOTES), help="Runtime note. Omit to infer from the --agent name.")
     dispatch_p.add_argument("--paths", nargs="*")
+    dispatch_p.add_argument("--from", dest="from_file", help="Batch: dispatch every task from a JSON or pipe-delimited file.")
     dispatch_p.add_argument("--base")
     dispatch_p.add_argument("--no-fetch", action="store_true")
     dispatch_p.add_argument("--force", action="store_true")
@@ -887,12 +1244,29 @@ def build_parser() -> argparse.ArgumentParser:
     close_p.add_argument("--status", default="closed", choices=["closed", "merged"])
     guard_p = sub.add_parser("guard", help="Verify active tasks stayed inside their allowed paths (anti-collision check).")
     guard_p.add_argument("--id", help="Guard a single task id. Default: all active tasks.")
+    guard_p.add_argument("--staged", action="store_true", help="Pre-commit mode: check only the staged files of the current worktree.")
+
+    sub.add_parser("install-hooks", help="Install a pre-commit guard hook so out-of-lane commits are blocked in real time.")
+    cleanup_p = sub.add_parser("cleanup", help="Remove merged/closed task worktrees and branches.")
+    cleanup_p.add_argument("--id")
+    cleanup_p.add_argument("--force", action="store_true")
+    board_p = sub.add_parser("board", help="One-screen status of every active task (dirty/ahead/behind/guard).")
+    board_p.add_argument("--watch", action="store_true")
+    sub.add_parser("radar", help="List files edited by more than one active task before you merge.")
+    launch_p = sub.add_parser("launch", help="Print the command to open each task's worktree in its program.")
+    launch_p.add_argument("--id")
+    launch_p.add_argument("--open", action="store_true", dest="do_open", help="Also open each worktree in the file manager.")
+    sub.add_parser("land", help="Print a read-only merge plan (order, overlaps, verify reminders).")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
     repo = repo_root(Path(args.repo).resolve())
+    # Coordination commands read manifests from the main checkout; resolve it so
+    # they also work when invoked from inside a worktree.
+    if args.cmd in {"board", "radar", "cleanup", "land", "launch", "status"}:
+        repo = main_checkout(repo)
     if args.cmd == "inspect":
         inspect(repo)
     elif args.cmd in {"setup", "init"}:
@@ -906,7 +1280,13 @@ def main() -> None:
     elif args.cmd == "examples":
         examples()
     elif args.cmd == "dispatch":
-        dispatch(args, repo)
+        if args.from_file:
+            dispatch_from(repo, Path(args.from_file), args.base, args.no_fetch, args.force)
+        else:
+            missing = [n for n in ("stream", "task", "agent") if not getattr(args, n)]
+            if missing:
+                raise SystemExit("dispatch needs --" + ", --".join(missing) + " (or use --from <file>).")
+            dispatch(args, repo)
     elif args.cmd == "status":
         status(repo)
     elif args.cmd in {"prompt", "handoff"}:
@@ -914,7 +1294,22 @@ def main() -> None:
     elif args.cmd == "close":
         close(repo, args.id, args.status)
     elif args.cmd == "guard":
-        guard(repo, args.id)
+        if args.staged:
+            guard_staged(repo)
+        else:
+            guard(repo, args.id)
+    elif args.cmd == "install-hooks":
+        install_hooks(repo)
+    elif args.cmd == "cleanup":
+        cleanup(repo, args.id, args.force)
+    elif args.cmd == "board":
+        raise SystemExit(board(repo, once=not args.watch))
+    elif args.cmd == "radar":
+        radar(repo)
+    elif args.cmd == "launch":
+        launch(repo, args.id, args.do_open)
+    elif args.cmd == "land":
+        land(repo)
 
 
 if __name__ == "__main__":

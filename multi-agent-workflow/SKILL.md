@@ -32,31 +32,31 @@ When the user asks for parallel agents (e.g. "let Claude do the docs and Codex d
 the frontend without clashing"):
 
 1. **Set up once.** If `.agents/workflow-config.toml` is missing, run
-   `python <skill>/scripts/multiagent.py init --repo <repo>`. `init` inspects the
-   repo, auto-detects streams from the folder layout, and installs the
-   coordination files. Skim the generated config; fix streams only if detection
-   is wrong.
+   `python <skill>/scripts/multiagent.py init --repo <repo>` (auto-detects streams
+   and installs coordination files), then `python scripts/multiagent.py
+   install-hooks` once. The hook makes the rest enforce itself: any commit that
+   strays outside a task's lane is blocked at commit time, not just caught later.
 
-2. **Dispatch one task per agent.** The minimum is three flags — the agent type
-   is inferred from the agent name and paths default to the stream's:
+2. **Dispatch.** One task per agent — three flags (type inferred, paths default):
 
    ```powershell
    python scripts/multiagent.py dispatch --stream <stream> --task "<short task>" --agent <name>
    ```
 
-   Add `--paths <files-or-folders>` to narrow ownership when several agents share
-   a stream. Overlapping paths with another active task are refused
-   automatically, so two agents can never be put on the same files by accident.
+   Or set up several at once from a file —
+   `python scripts/multiagent.py dispatch --from tasks.txt`
+   (each line: `stream | agent | task | path1,path2`). Overlapping paths with
+   another active task are refused automatically.
 
 3. **Hand off in one sentence.** Tell the user which folder to open in each agent
-   and to say: *"Work on the current task in `.agents/current-task.md`."* That
-   file is the full contract (worktree, allowed paths, blocked paths, report
-   format) — no long prompt to paste.
+   (`python scripts/multiagent.py launch` prints the exact open command per
+   program) and to say: *"Work on the current task in `.agents/current-task.md`."*
 
-4. **Guard before merge.** After agents finish, from the main checkout run
-   `python scripts/multiagent.py guard`. It reports any file edited outside an
-   agent's allowed paths and flags collisions with another task's lane. Re-scope
-   or move the work before merging.
+4. **Watch, then land.** `python scripts/multiagent.py board` (add `--watch`)
+   shows every agent's status and guard state on one screen. Before merging, run
+   `guard` (lane check), `radar` (files that two tasks both edited), and `land`
+   (a read-only merge plan). After merge, `cleanup` removes finished worktrees
+   and branches.
 
 Everything below is the detailed reference for when the seamless path needs
 adjusting.
@@ -156,12 +156,17 @@ Ask before proceeding when:
 
 ## Bundled Resources
 
-- `scripts/multiagent.py`: cross-project CLI for inspect, setup/init, install,
-  doctor, examples, dispatch, status, task handoff, guard (anti-collision
-  check), and close operations.
+- `scripts/multiagent.py`: cross-project CLI. Setup: `inspect`, `setup`/`init`,
+  `install`, `install-hooks`, `doctor`, `examples`. Run: `dispatch` (incl.
+  `--from` batch), `status`, `board` (`--watch`), `launch`, `handoff`. Safety:
+  `guard` (and `guard --staged` for the pre-commit hook), `radar` (cross-task
+  file overlap). Finish: `land` (merge plan), `close`, `cleanup`.
 - `tests/test_workflow.py`: end-to-end test on a throwaway repo proving universal
   setup, one-line dispatch, dispatch-time overlap blocking, guard catching
   out-of-lane edits, and multi-program discovery. Run `python tests/test_workflow.py`.
+- `tests/test_upgrade.py`: tests the upgrade commands — real-time pre-commit
+  block, board, radar, batch dispatch, launch, land, cleanup. Run
+  `python tests/test_upgrade.py`.
 - `tests/test_vs_baseline.py`: A/B test proving the workflow beats NOT using it.
   It reproduces the two failures of a shared working tree (one agent's commit
   sweeping in another's in-progress files; silent same-file clobber) and shows

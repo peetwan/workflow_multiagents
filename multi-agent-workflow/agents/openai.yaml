@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multi-Agent Workflow"
+  short_description: "Coordinate parallel agents safely"
+  default_prompt: "Use $multi-agent-workflow to set up safe parallel agent worktrees for this repo."

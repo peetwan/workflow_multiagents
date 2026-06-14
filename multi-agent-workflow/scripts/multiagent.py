@@ -1,0 +1,509 @@
+#!/usr/bin/env python3
+"""Repo-local multi-agent workflow helper.
+
+This script is dependency-free and can be run from the skill folder or copied
+into a target repository by `install`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover
+    tomllib = None
+
+
+RUNTIME_GITIGNORE = [
+    ".agents/tasks/*.json",
+    ".agents/tasks/*.prompt.md",
+    ".agents/locks/*.lock",
+]
+
+
+def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True)
+    if check and proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise SystemExit(f"Command failed: {' '.join(cmd)}\n{detail}")
+    return proc
+
+
+def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return run(["git", "-C", str(repo), *args], check=check)
+
+
+def repo_root(start: Path) -> Path:
+    proc = run(["git", "-C", str(start), "rev-parse", "--show-toplevel"], check=False)
+    if proc.returncode != 0:
+        raise SystemExit(f"Not a git repository: {start}")
+    return Path(proc.stdout.strip()).resolve()
+
+
+def slug(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    cleaned = re.sub(r"-{2,}", "-", cleaned)
+    if not cleaned:
+        raise SystemExit(f"Cannot create slug from: {value!r}")
+    return cleaned[:80]
+
+
+def norm_path(value: str) -> str:
+    return value.strip().strip('"').strip("'").replace("\\", "/").lstrip("./").rstrip("/")
+
+
+def overlaps(left: str, right: str) -> bool:
+    a = norm_path(left)
+    b = norm_path(right)
+    return a == b or a.startswith(f"{b}/") or b.startswith(f"{a}/")
+
+
+def now_id(agent: str, task: str) -> str:
+    return f"{_dt.datetime.now():%Y%m%d}-{slug(agent)}-{slug(task)}"
+
+
+def load_toml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    if tomllib is None:
+        raise SystemExit("Python 3.11+ is required to read .agents/workflow-config.toml")
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def top_level_entries(repo: Path) -> list[Path]:
+    ignored = {".git", ".agents", ".github", "node_modules", "dist", "build", "__pycache__"}
+    return sorted([p for p in repo.iterdir() if p.name not in ignored], key=lambda p: p.name.lower())
+
+
+def detect_service_dirs(repo: Path) -> list[str]:
+    markers = {
+        "package.json",
+        "requirements.txt",
+        "pyproject.toml",
+        "Cargo.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+    }
+    services: list[str] = []
+    for entry in top_level_entries(repo):
+        if entry.is_dir() and any((entry / marker).exists() for marker in markers):
+            services.append(f"{entry.name}/")
+    return services
+
+
+def detect_docs(repo: Path) -> list[str]:
+    docs: list[str] = []
+    for name in ["docs", "doc", "wiki", "docs_th"]:
+        if (repo / name).is_dir():
+            docs.append(f"{name}/")
+    for name in ["README.md", "CLAUDE.md", "AGENTS.md"]:
+        if (repo / name).exists():
+            docs.append(name)
+    return docs
+
+
+def infer_streams(repo: Path) -> dict[str, dict[str, Any]]:
+    services = detect_service_dirs(repo)
+    streams: dict[str, dict[str, Any]] = {}
+    if services:
+        if len(services) == 1:
+            streams["app"] = {"status": "active", "paths": services, "blocked": []}
+        else:
+            for service in services:
+                stream = slug(service.strip("/"))
+                streams[stream] = {
+                    "status": "active",
+                    "paths": [service],
+                    "blocked": [s for s in services if s != service],
+                }
+    else:
+        source_dirs = [f"{p.name}/" for p in top_level_entries(repo) if p.is_dir()]
+        streams["app"] = {"status": "active", "paths": source_dirs or ["."], "blocked": []}
+
+    docs = detect_docs(repo)
+    if docs:
+        streams["docs"] = {"status": "shared", "paths": docs, "blocked": []}
+
+    ops_paths = [p for p in [".github/", "scripts/", ".agents/"] if (repo / p.rstrip("/")).exists()]
+    if (repo / "AGENTS.md").exists():
+        ops_paths.append("AGENTS.md")
+    streams["ops"] = {"status": "shared", "paths": sorted(set(ops_paths or [".github/", "scripts/", ".agents/"])), "blocked": []}
+    return streams
+
+
+def format_toml_list(values: list[str]) -> str:
+    return "[" + ", ".join(json.dumps(v) for v in values) + "]"
+
+
+def write_default_config(repo: Path, force: bool = False) -> Path:
+    config = repo / ".agents" / "workflow-config.toml"
+    if config.exists() and not force:
+        return config
+    streams = infer_streams(repo)
+    current_branch = git(repo, "branch", "--show-current", check=False).stdout.strip()
+    base = current_branch or "main"
+    lines = [
+        '# Generated by the "multi-agent-workflow" skill. Review before broad dispatch.',
+        f'default_base = "{base}"',
+        'worktree_root = "../_worktrees"',
+        "",
+    ]
+    for name, data in streams.items():
+        lines.append(f"[streams.{name}]")
+        lines.append(f'status = "{data["status"]}"')
+        lines.append(f"paths = {format_toml_list(data['paths'])}")
+        lines.append(f"blocked = {format_toml_list(data.get('blocked', []))}")
+        lines.append("")
+    config.write_text("\n".join(lines), encoding="utf-8")
+    return config
+
+
+def append_unique_lines(path: Path, lines: list[str]) -> None:
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    additions = [line for line in lines if line not in existing]
+    if not additions:
+        return
+    separator = "" if existing.endswith("\n") or not existing else "\n"
+    path.write_text(existing + separator + "\n".join(additions) + "\n", encoding="utf-8")
+
+
+def ensure_dirs(repo: Path) -> None:
+    for rel in [".agents/tasks", ".agents/locks", "scripts"]:
+        (repo / rel).mkdir(parents=True, exist_ok=True)
+    for rel in [".agents/tasks/.gitkeep", ".agents/locks/.gitkeep"]:
+        path = repo / rel
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+
+
+def install(repo: Path, force: bool = False) -> None:
+    ensure_dirs(repo)
+    config = write_default_config(repo, force=force)
+    workflow = repo / ".agents" / "workflow.md"
+    if force or not workflow.exists():
+        workflow.write_text(
+            textwrap.dedent(
+                """\
+                # Multi-Agent Workflow
+
+                Default rule: one task = one agent = one branch = one worktree.
+
+                Use `scripts/multiagent.py status` before starting agents.
+                Use `scripts/multiagent.py dispatch --stream <stream> --task <task> --agent <name> --paths <paths...>` to create isolated work.
+                Keep edits inside the generated prompt's allowed paths.
+                Close the task manifest after merge with `scripts/multiagent.py close --id <task-id>`.
+                """
+            ),
+            encoding="utf-8",
+        )
+    readme = repo / ".agents" / "README.md"
+    if force or not readme.exists():
+        readme.write_text(
+            "Local coordination files for multi-agent work. Runtime task manifests and prompts are ignored by git.\n",
+            encoding="utf-8",
+        )
+    agents = repo / "AGENTS.md"
+    if not agents.exists():
+        agents.write_text(
+            textwrap.dedent(
+                """\
+                # Agent Rules
+
+                Read `.agents/workflow.md` before starting work. Use one branch and one worktree per task.
+                Stay inside the allowed paths in the generated dispatch prompt.
+                """
+            ),
+            encoding="utf-8",
+        )
+    else:
+        marker = "## Multi-Agent Workflow"
+        if marker not in agents.read_text(encoding="utf-8", errors="replace"):
+            append_unique_lines(
+                agents,
+                [
+                    "",
+                    marker,
+                    "",
+                    "Read `.agents/workflow.md` and use generated dispatch prompts for parallel-agent work.",
+                ],
+            )
+    append_unique_lines(repo / ".gitignore", ["", "# Multi-agent workflow runtime", *RUNTIME_GITIGNORE])
+    shutil.copy2(Path(__file__).resolve(), repo / "scripts" / "multiagent.py")
+    print(f"Installed multi-agent workflow in {repo}")
+    print(f"Review config: {config}")
+
+
+def inspect(repo: Path) -> None:
+    branch = git(repo, "branch", "--show-current", check=False).stdout.strip() or "(detached)"
+    remotes = git(repo, "remote", "-v", check=False).stdout.strip()
+    status = git(repo, "status", "--short", "--branch", check=False).stdout.strip()
+    worktrees = git(repo, "worktree", "list", check=False).stdout.strip()
+    services = detect_service_dirs(repo)
+    docs = detect_docs(repo)
+    existing = [
+        rel
+        for rel in ["AGENTS.md", ".agents/workflow-config.toml", ".agents/workflow.md", ".github/pull_request_template.md"]
+        if (repo / rel).exists()
+    ]
+    print(f"Repo: {repo}")
+    print(f"Branch: {branch}")
+    print("\nStatus:")
+    print(status or "(clean)")
+    print("\nRemotes:")
+    print(remotes or "(none)")
+    print("\nDetected service/app folders:")
+    print("\n".join(f"- {s}" for s in services) or "- none")
+    print("\nDetected docs:")
+    print("\n".join(f"- {d}" for d in docs) or "- none")
+    print("\nExisting coordination files:")
+    print("\n".join(f"- {e}" for e in existing) or "- none")
+    print("\nWorktrees:")
+    print(worktrees or "(none)")
+    print("\nRecommendation:")
+    if not (repo / ".agents/workflow-config.toml").exists():
+        print("- Run install, then review `.agents/workflow-config.toml` before dispatching agents.")
+    else:
+        print("- Review active task manifests with status before dispatching more work.")
+
+
+def task_root(repo: Path) -> Path:
+    root = repo / ".agents" / "tasks"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def load_manifests(repo: Path) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for path in task_root(repo).glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["_path"] = str(path)
+            items.append(data)
+        except json.JSONDecodeError:
+            print(f"Warning: could not read manifest {path}", file=sys.stderr)
+    return items
+
+
+def load_config(repo: Path) -> dict[str, Any]:
+    config_path = repo / ".agents" / "workflow-config.toml"
+    if not config_path.exists():
+        raise SystemExit("Missing .agents/workflow-config.toml. Run install first.")
+    return load_toml(config_path)
+
+
+def stream_config(config: dict[str, Any], name: str) -> dict[str, Any]:
+    streams = config.get("streams", {})
+    if name not in streams:
+        raise SystemExit(f"Unknown stream '{name}'. Add it to .agents/workflow-config.toml first.")
+    return streams[name]
+
+
+def active_conflicts(repo: Path, requested: list[str], task_id: str) -> list[dict[str, str]]:
+    conflicts: list[dict[str, str]] = []
+    for manifest in load_manifests(repo):
+        if manifest.get("id") == task_id or manifest.get("status", "active") in {"closed", "merged"}:
+            continue
+        for owned in manifest.get("paths", []):
+            for path in requested:
+                if overlaps(owned, path):
+                    conflicts.append(
+                        {
+                            "id": manifest.get("id", ""),
+                            "agent": manifest.get("agent", ""),
+                            "stream": manifest.get("stream", ""),
+                            "owned": owned,
+                            "requested": path,
+                        }
+                    )
+    return conflicts
+
+
+def create_worktree(repo: Path, branch: str, target: Path, base: str, no_fetch: bool) -> None:
+    if not no_fetch:
+        git(repo, "fetch", "origin", "--prune", check=False)
+    remote_ref = f"refs/remotes/origin/{base}"
+    has_remote = git(repo, "show-ref", "--verify", "--quiet", remote_ref, check=False).returncode == 0
+    start = f"origin/{base}" if has_remote else base
+    target.parent.mkdir(parents=True, exist_ok=True)
+    git(repo, "worktree", "add", "-b", branch, str(target), start)
+
+
+def make_prompt(agent: str, task: str, stream: str, branch: str, worktree: Path, paths: list[str], blocked: list[str]) -> str:
+    allowed = "\n".join(f"- {p}" for p in paths)
+    denied = "\n".join(f"- {p}" for p in blocked) or "- none configured"
+    return textwrap.dedent(
+        f"""\
+        You are working as: {agent}
+        Task: {task}
+        Stream: {stream}
+        Branch: {branch}
+        Use this worktree only:
+        {worktree}
+
+        Before touching files:
+        1. Read AGENTS.md if present.
+        2. Read .agents/workflow.md if present.
+        3. Run git status --short --branch.
+
+        Allowed paths:
+        {allowed}
+
+        Do not touch:
+        {denied}
+
+        Workflow:
+        1. Keep edits inside the allowed paths.
+        2. Do not rename project/service folders unless the user explicitly asks.
+        3. Do not mix refactors with bug fixes.
+        4. If a shared file is required, stop and mention it before editing.
+        5. Before final answer, run the relevant checks for the changed files.
+
+        Final report must include:
+        - Changed files
+        - Checks run
+        - Risks or follow-ups
+        - Whether the branch is ready for PR/merge
+        """
+    )
+
+
+def dispatch(args: argparse.Namespace, repo: Path) -> None:
+    config = load_config(repo)
+    stream = stream_config(config, args.stream)
+    if stream.get("status") == "parked" and not args.force:
+        raise SystemExit(f"Stream '{args.stream}' is parked. Use --force only if the user explicitly unparked it.")
+    task_id = now_id(args.agent, args.task)
+    paths = [norm_path(p) for p in (args.paths or stream.get("paths", []))]
+    if not paths:
+        raise SystemExit("No paths configured. Pass --paths or update .agents/workflow-config.toml.")
+    conflicts = active_conflicts(repo, paths, task_id)
+    if conflicts and not args.force:
+        print("Path ownership conflicts detected:")
+        for item in conflicts:
+            print(f"- {item['id']} owns {item['owned']} overlaps requested {item['requested']}")
+        raise SystemExit("Use narrower --paths, close the old task, or pass --force intentionally.")
+    base = args.base or config.get("default_base", "main")
+    worktree_root = Path(config.get("worktree_root", "../_worktrees"))
+    if not worktree_root.is_absolute():
+        worktree_root = (repo / worktree_root).resolve()
+    worktree = worktree_root / args.stream / task_id
+    branch = f"agent/{args.stream}/{task_id}"
+    create_worktree(repo, branch, worktree, base, args.no_fetch)
+    prompt = make_prompt(args.agent, args.task, args.stream, branch, worktree, paths, list(stream.get("blocked", [])))
+    prompt_path = task_root(repo) / f"{task_id}.prompt.md"
+    manifest_path = task_root(repo) / f"{task_id}.json"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    manifest = {
+        "id": task_id,
+        "status": "active",
+        "stream": args.stream,
+        "task": args.task,
+        "agent": args.agent,
+        "branch": branch,
+        "base": base,
+        "worktreePath": str(worktree),
+        "promptPath": str(prompt_path),
+        "paths": paths,
+        "createdAt": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"Dispatch ready: {task_id}")
+    print(f"Worktree: {worktree}")
+    print(f"Branch: {branch}")
+    print(f"Prompt: {prompt_path}")
+    print("\nCopy this prompt to the agent:\n")
+    print(prompt)
+
+
+def status(repo: Path) -> None:
+    manifests = load_manifests(repo)
+    active = [m for m in manifests if m.get("status", "active") not in {"closed", "merged"}]
+    print("Active task manifests:")
+    if not active:
+        print("- none")
+    for item in active:
+        print(f"- {item.get('id')} [{item.get('stream')}] {item.get('agent')} -> {item.get('branch')}")
+        for path in item.get("paths", []):
+            print(f"  owns: {path}")
+    print("\nGit worktrees:")
+    print(git(repo, "worktree", "list", check=False).stdout.strip() or "(none)")
+
+
+def print_prompt(repo: Path, task_id: str | None) -> None:
+    manifests = sorted(load_manifests(repo), key=lambda m: m.get("createdAt", ""), reverse=True)
+    if task_id:
+        manifests = [m for m in manifests if m.get("id") == task_id]
+    if not manifests:
+        raise SystemExit("No matching task prompt found.")
+    prompt_path = Path(manifests[0]["promptPath"])
+    print(prompt_path.read_text(encoding="utf-8"))
+
+
+def close(repo: Path, task_id: str, status_value: str) -> None:
+    manifest_path = task_root(repo) / f"{task_id}.json"
+    if not manifest_path.exists():
+        raise SystemExit(f"No manifest found for {task_id}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["status"] = status_value
+    manifest["closedAt"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"Marked {task_id} as {status_value}.")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Coordinate parallel AI-agent work in a Git repo.")
+    parser.add_argument("--repo", default=".", help="Target repository path")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("inspect")
+    install_p = sub.add_parser("install")
+    install_p.add_argument("--force", action="store_true")
+
+    dispatch_p = sub.add_parser("dispatch")
+    dispatch_p.add_argument("--stream", required=True)
+    dispatch_p.add_argument("--task", required=True)
+    dispatch_p.add_argument("--agent", required=True)
+    dispatch_p.add_argument("--paths", nargs="*")
+    dispatch_p.add_argument("--base")
+    dispatch_p.add_argument("--no-fetch", action="store_true")
+    dispatch_p.add_argument("--force", action="store_true")
+
+    sub.add_parser("status")
+    prompt_p = sub.add_parser("prompt")
+    prompt_p.add_argument("--id")
+    close_p = sub.add_parser("close")
+    close_p.add_argument("--id", required=True)
+    close_p.add_argument("--status", default="closed", choices=["closed", "merged"])
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    repo = repo_root(Path(args.repo).resolve())
+    if args.cmd == "inspect":
+        inspect(repo)
+    elif args.cmd == "install":
+        install(repo, force=args.force)
+    elif args.cmd == "dispatch":
+        dispatch(args, repo)
+    elif args.cmd == "status":
+        status(repo)
+    elif args.cmd == "prompt":
+        print_prompt(repo, args.id)
+    elif args.cmd == "close":
+        close(repo, args.id, args.status)
+
+
+if __name__ == "__main__":
+    main()

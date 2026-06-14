@@ -104,6 +104,28 @@ of a useless `cd && claude`:
 `launch` prints all of this per task; `desktop-config` prints (or `--write`
 merges) the Claude Desktop filesystem config for every worktree at once.
 
+## Am I Ready? (doctor / selftest)
+
+Two commands answer "is this set up correctly?" with no guessing:
+
+- **`python scripts/multiagent.py doctor`** — a flutter-doctor-style checklist
+  with a clear **READY / NOT READY** verdict and the exact fix for every gap:
+  installed? committed to the base branch? guard hook on? `python` on PATH for
+  the hook? agent CLIs found? any guard/radar issues? Claude Desktop config
+  present and granting the worktrees? worktree paths free of spaces (Claude
+  Desktop's filesystem MCP breaks on spaces)? It exits 0 only when ready, so it
+  is scriptable.
+- **`python scripts/multiagent.py selftest`** — builds a throwaway repo and
+  proves the whole path on the current machine: install, isolated dispatch, and
+  the pre-commit hook actually **blocking** an out-of-lane commit while allowing
+  an in-lane one. Prints `SELF-TEST PASSED` or the failing step. This catches
+  machine-specific issues (e.g. `python` missing from the hook's PATH).
+
+For desktop apps the only thing a script cannot verify is the *live* connection
+— confirm that in **Claude Desktop** by typing `/mcp` in a chat (the
+`filesystem` server should be listed), and in **Codex Desktop** by opening the
+project at the worktree path.
+
 ## Proven Better Than a Shared Checkout
 
 `multi-agent-workflow/tests/test_vs_baseline.py` is an A/B test. It reproduces
@@ -191,19 +213,22 @@ python multi-agent-workflow/scripts/multiagent.py --repo C:\path\to\repo setup
 After setup, use the repo-local copy:
 
 ```powershell
-python scripts/multiagent.py init                        # setup (alias) + auto-detect streams
-python scripts/multiagent.py install-hooks               # block out-of-lane commits in real time
+python scripts/multiagent.py ready --commit              # one command: install + hooks + commit + READY check
+python scripts/multiagent.py doctor                      # is it ready? READY / NOT READY + the fix for each gap
+python scripts/multiagent.py selftest                    # prove the whole path works on THIS machine
 python scripts/multiagent.py dispatch --from tasks.txt   # batch; or one --stream/--task/--agent per task
 python scripts/multiagent.py board                       # one-screen status of every agent
-python scripts/multiagent.py launch                      # print the open command per program
+python scripts/multiagent.py launch                      # how to open each worktree (CLI or desktop app)
+python scripts/multiagent.py desktop-config --write      # grant Claude Desktop access to every worktree
 python scripts/multiagent.py guard                       # lane check (which files left their lane)
 python scripts/multiagent.py radar                       # files that two tasks both edited
 python scripts/multiagent.py land                        # read-only merge plan
 python scripts/multiagent.py cleanup                     # remove finished worktrees + branches
 ```
 
-`init` auto-detects streams; `install-hooks` enforces lanes at commit time;
-`guard`/`radar`/`land` are the pre-merge checks; `cleanup` tidies up after.
+`ready` sets up everything in one command and tells you if you're READY; `doctor`
+re-checks anytime; `selftest` proves the whole path (including the guard hook)
+works on your machine.
 
 Supported `--agent-type` values:
 

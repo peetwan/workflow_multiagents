@@ -31,11 +31,13 @@ at most one command per task. The user never memorizes the CLI.
 When the user asks for parallel agents (e.g. "let Claude do the docs and Codex do
 the frontend without clashing"):
 
-1. **Set up once.** If `.agents/workflow-config.toml` is missing, run
-   `python <skill>/scripts/multiagent.py init --repo <repo>` (auto-detects streams
-   and installs coordination files), then `python scripts/multiagent.py
-   install-hooks` once. The hook makes the rest enforce itself: any commit that
-   strays outside a task's lane is blocked at commit time, not just caught later.
+1. **Set up once.** Run `python <skill>/scripts/multiagent.py ready --commit
+   --repo <repo>`. One command installs the workflow, the real-time guard hook,
+   and commits the workflow files (so worktrees carry them), then prints a
+   **READY / NOT READY** verdict with the fix for anything missing. Re-check
+   anytime with `multiagent.py doctor`; prove it works on the machine with
+   `multiagent.py selftest`. (The hook blocks any commit that strays outside a
+   task's lane, at commit time.)
 
 2. **Dispatch.** One task per agent — three flags (type inferred, paths default):
 
@@ -159,8 +161,10 @@ Ask before proceeding when:
 
 ## Bundled Resources
 
-- `scripts/multiagent.py`: cross-project CLI. Setup: `inspect`, `setup`/`init`,
-  `install`, `install-hooks`, `doctor`, `examples`. Run: `dispatch` (incl.
+- `scripts/multiagent.py`: cross-project CLI. Setup: `ready` (one-command
+  install + hooks + readiness), `init`/`setup`, `install`, `install-hooks`,
+  `doctor` (READY/NOT READY check), `selftest` (end-to-end proof), `examples`.
+  Run: `dispatch` (incl.
   `--from` batch), `status`, `board` (`--watch`), `launch`, `desktop-config`
   (Claude Desktop filesystem MCP), `handoff`. Safety: `guard` (and
   `guard --staged` for the pre-commit hook), `radar` (cross-task file overlap).

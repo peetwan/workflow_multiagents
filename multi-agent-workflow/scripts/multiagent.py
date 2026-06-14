@@ -13,8 +13,10 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from pathlib import Path
@@ -471,30 +473,278 @@ def inspect(repo: Path) -> None:
         print("- Review active task manifests with status before dispatching more work.")
 
 
-def doctor(repo: Path) -> None:
-    print("Multi-Agent Workflow Doctor")
-    print("===========================")
-    print(f"Repo: {repo}")
-    status_text = git(repo, "status", "--short", "--branch", check=False).stdout.strip()
-    print("\nGit status:")
-    print(status_text or "(clean)")
+def _which(name: str) -> str | None:
+    return shutil.which(name)
 
-    required = [
-        ".agents/workflow-config.toml",
-        ".agents/workflow.md",
-        ".agents/quickstart.md",
-        "scripts/multiagent.py",
-        "AGENTS.md",
-    ]
-    optional = list(AGENT_ENTRYPOINTS)
-    print("\nCore files:")
-    for rel in required:
-        print(f"- {'OK' if (repo / rel).exists() else 'MISSING'} {rel}")
-    print("\nAgent entry files:")
-    for rel in optional:
-        print(f"- {'OK' if (repo / rel).exists() else 'missing'} {rel}")
-    print("\nRuntime status:")
-    status(repo)
+
+def _committed_on_base(repo: Path, base: str, rel: str) -> bool:
+    return run(["git", "-C", str(repo), "cat-file", "-e", f"{base}:{rel}"], check=False).returncode == 0
+
+
+def _hook_present(repo: Path) -> bool:
+    try:
+        pre = _hooks_dir(repo) / "pre-commit"
+        return pre.exists() and HOOK_MARKER in pre.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _config_base(repo: Path) -> str:
+    cfg = repo / ".agents" / "workflow-config.toml"
+    if cfg.exists():
+        try:
+            return load_toml(cfg).get("default_base", "main") or "main"
+        except Exception:
+            return "main"
+    return "main"
+
+
+def doctor(repo: Path) -> int:
+    """Readiness check: a flutter-doctor-style checklist with a clear verdict.
+
+    Returns 0 when the repo is READY for multi-agent work, 1 otherwise. Output is
+    ASCII-only so it is stable across every terminal/encoding.
+    """
+    print("Multi-Agent Workflow - Readiness Check")
+    print("=" * 42)
+    counts = {"fatal": 0, "warn": 0}
+
+    def ok(msg):
+        print(f"  [OK] {msg}")
+
+    def bad(msg, fix=""):
+        counts["fatal"] += 1
+        print(f"  [X]  {msg}")
+        if fix:
+            print(f"       -> {fix}")
+
+    def rec(msg, fix=""):
+        counts["warn"] += 1
+        print(f"  [!]  {msg}")
+        if fix:
+            print(f"       -> {fix}")
+
+    def info(msg):
+        print(f"  [i]  {msg}")
+
+    base = _config_base(repo)
+
+    # 1. workflow installed
+    missing = [r for r in [".agents/workflow-config.toml", "AGENTS.md", "scripts/multiagent.py", ".agents/workflow.md"]
+               if not (repo / r).exists()]
+    if missing:
+        bad(f"workflow not fully installed (missing: {', '.join(missing)})", "python scripts/multiagent.py ready")
+    else:
+        ok("workflow installed (.agents/, AGENTS.md, scripts/multiagent.py)")
+
+    # 2. committed to the base branch (so worktrees carry the entry files)
+    if not missing:
+        not_committed = [r for r in ["AGENTS.md", "CLAUDE.md", ".agents/workflow.md"]
+                         if (repo / r).exists() and not _committed_on_base(repo, base, r)]
+        if not_committed:
+            bad(f"workflow files not committed to '{base}' (new worktrees will NOT carry them)",
+                "python scripts/multiagent.py ready --commit")
+        else:
+            ok(f"workflow committed to '{base}' (worktrees carry AGENTS.md / CLAUDE.md)")
+
+    # 3. runtime ignore rules
+    gi = repo / ".gitignore"
+    if gi.exists() and ".agents/current-task.md" in gi.read_text(encoding="utf-8", errors="replace"):
+        ok("runtime files are git-ignored")
+    else:
+        rec("runtime ignore rules missing in .gitignore", "python scripts/multiagent.py install")
+
+    # 4. real-time guard hook
+    if _hook_present(repo):
+        ok("real-time guard hook installed")
+    else:
+        rec("real-time guard hook NOT installed (commits are not lane-checked)",
+            "python scripts/multiagent.py install-hooks")
+
+    # 5. python for the hook
+    py = _which("python") or _which("python3")
+    if py:
+        ok(f"python available for the hook ({Path(py).name})")
+    else:
+        rec("python is not on PATH (the commit hook will be skipped)", "install Python and add it to PATH")
+
+    # 6. agent CLIs (informational)
+    found = [n for n in ("claude", "codex", "gemini", "qwen") if _which(n)]
+    info("agent CLIs on PATH: " + (", ".join(found) if found else "none")
+         + "  (desktop apps and Warp do not need a CLI)")
+
+    # 7. active tasks + guard/radar + space-in-path stability check
+    active = active_manifests(repo)
+    if active:
+        owners = _owners(active)
+        viol = 0
+        spaces = []
+        by_file: dict[str, set] = {}
+        for m in active:
+            wt = Path(m.get("worktreePath", ""))
+            if " " in str(wt):
+                spaces.append(str(wt))
+            if wt.exists():
+                changed = worktree_changes(wt, m.get("base", "main"))
+                viol += len(_violations_for(changed, [norm_path(p) for p in m.get("paths", [])], owners, m.get("id", "")))
+                for f in changed:
+                    by_file.setdefault(norm_path(f), set()).add(m.get("id", ""))
+        clashes = sum(1 for ids in by_file.values() if len(ids) > 1)
+        msg = f"{len(active)} active task(s), {viol} guard violation(s), {clashes} radar clash(es)"
+        if viol or clashes:
+            rec(msg, "python scripts/multiagent.py board   (then guard / radar)")
+        else:
+            ok(msg)
+        if spaces:
+            rec(f"{len(spaces)} worktree path(s) contain spaces (Claude Desktop's filesystem MCP fails on spaces)",
+                "set worktree_root to a space-free path in .agents/workflow-config.toml")
+    else:
+        info("no active tasks yet (run dispatch to start one)")
+
+    # 8. Claude Desktop config (only relevant if you use Claude Desktop)
+    cdc = claude_desktop_config_path()
+    if cdc.exists():
+        try:
+            data = json.loads(cdc.read_text(encoding="utf-8"))
+            cfg_args: list[str] = []
+            for srv in data.get("mcpServers", {}).values():
+                if isinstance(srv, dict) and isinstance(srv.get("args"), list):
+                    cfg_args += [str(a) for a in srv["args"]]
+            granted = sum(1 for m in active if str(Path(m.get("worktreePath", "")).resolve()) in cfg_args)
+            if active and granted < len(active):
+                rec(f"Claude Desktop config found, but only {granted}/{len(active)} worktree(s) granted",
+                    "python scripts/multiagent.py desktop-config --write   (then restart Claude Desktop)")
+            else:
+                ok(f"Claude Desktop config found ({granted} worktree(s) granted)")
+        except json.JSONDecodeError:
+            rec(f"Claude Desktop config is not valid JSON ({cdc})", "fix or recreate the file")
+    else:
+        info(f"Claude Desktop config not found (only needed for Claude Desktop): {cdc}")
+
+    print("=" * 42)
+    if counts["fatal"]:
+        extra = f", {counts['warn']} recommendation(s)" if counts["warn"] else ""
+        print(f"  NOT READY - {counts['fatal']} blocking issue(s){extra}.")
+        print("  Fix the [X] items above, then re-run:  multiagent.py doctor")
+        return 1
+    if counts["warn"]:
+        print(f"  READY  ({counts['warn']} recommendation(s) - see [!] above)")
+    else:
+        print("  READY - everything checks out.")
+    print("  Prove it on this machine:   multiagent.py selftest")
+    print("  Live desktop check: Claude Desktop -> type /mcp in a chat; Codex Desktop -> open the project folder.")
+    return 0
+
+
+def selftest() -> int:
+    """Build a throwaway repo and prove the critical path works on THIS machine:
+    install, isolated dispatch, and the pre-commit hook blocking an out-of-lane
+    commit while allowing an in-lane one. Prints SELF-TEST PASSED/FAILED."""
+    script = Path(__file__).resolve()
+    root = Path(tempfile.mkdtemp(prefix="maw-selftest-"))
+    steps: list[tuple[str, bool]] = []
+
+    def step(name, cond):
+        steps.append((name, bool(cond)))
+        print(f"  [{'OK' if cond else 'FAIL'}] {name}")
+        return bool(cond)
+
+    try:
+        repo = root / "project"
+        (repo / "frontend").mkdir(parents=True)
+        (repo / "backend").mkdir(parents=True)
+        (repo / "frontend" / "package.json").write_text('{"n":"fe"}\n', encoding="utf-8")
+        (repo / "backend" / "requirements.txt").write_text("flask\n", encoding="utf-8")
+
+        def g(*a, cwd=repo):
+            return run(["git", "-C", str(cwd), *a], check=False)
+
+        def me(*a):
+            return run([sys.executable, str(script), "--repo", str(repo), *a], check=False)
+
+        g("init")
+        g("config", "user.email", "s@t.c")
+        g("config", "user.name", "S")
+        g("add", "-A")
+        g("commit", "-m", "init")
+        g("branch", "-M", "main")
+
+        print("Self-test on a throwaway repo (your machine):")
+        step("init installs the workflow", me("init").returncode == 0 and (repo / "AGENTS.md").exists())
+        g("add", "-A")
+        g("commit", "-m", "bootstrap")
+        step("install-hooks succeeds", me("install-hooks").returncode == 0)
+        a = me("dispatch", "--stream", "frontend", "--task", "a", "--agent", "claude")
+        b = me("dispatch", "--stream", "backend", "--task", "b", "--agent", "codex")
+        step("dispatch creates isolated worktrees", a.returncode == 0 and b.returncode == 0)
+
+        wt = None
+        for f in (repo / ".agents" / "tasks").glob("*.json"):
+            d = json.loads(f.read_text(encoding="utf-8"))
+            if d.get("agent") == "claude":
+                wt = Path(d["worktreePath"])
+        ok_wt = step("frontend worktree exists", bool(wt and wt.exists()))
+
+        hook_blocks = hook_allows = False
+        if ok_wt:
+            before = g("rev-parse", "HEAD", cwd=wt).stdout.strip()
+            (wt / "backend" / "api.py").write_text("# stray\n", encoding="utf-8")
+            g("add", "backend/api.py", cwd=wt)
+            r = g("commit", "-m", "stray", cwd=wt)
+            after = g("rev-parse", "HEAD", cwd=wt).stdout.strip()
+            hook_blocks = r.returncode != 0 and after == before
+            g("reset", "--hard", before, cwd=wt)
+            (wt / "frontend" / "app.js").write_text("// ok\n", encoding="utf-8")
+            g("add", "frontend/app.js", cwd=wt)
+            hook_allows = g("commit", "-m", "inlane", cwd=wt).returncode == 0
+        step("hook BLOCKS an out-of-lane commit", hook_blocks)
+        step("hook ALLOWS an in-lane commit", hook_allows)
+
+        passed = all(c for _, c in steps)
+        print("\n  " + ("SELF-TEST PASSED - your setup works." if passed else "SELF-TEST FAILED - see [FAIL] above."))
+        if ok_wt and not hook_blocks:
+            print("  (Hook step failed? Ensure `python` or `python3` is on PATH so git hooks can run it.)")
+        return 0 if passed else 1
+    except Exception as exc:  # noqa: BLE001 - self-test must never explode
+        print(f"  SELF-TEST ERROR: {exc}")
+        return 1
+    finally:
+        def _rm(fn, p, _e):
+            try:
+                os.chmod(p, stat.S_IWRITE)
+                fn(p)
+            except OSError:
+                pass
+        try:
+            shutil.rmtree(root, onerror=_rm)
+        except OSError:
+            pass
+
+
+def ready(repo: Path, do_commit: bool) -> int:
+    """One command to get ready: install + hooks + (optional bootstrap commit),
+    then print the readiness verdict."""
+    print("Setting up the multi-agent workflow...\n")
+    install(repo)
+    print()
+    install_hooks(repo)
+    base = _config_base(repo)
+    need_commit = any((repo / r).exists() and not _committed_on_base(repo, base, r)
+                      for r in ["AGENTS.md", ".agents/workflow.md"])
+    if need_commit:
+        if do_commit:
+            for r in ["AGENTS.md", "CLAUDE.md", "GEMINI.md", "ANTIGRAVITY.md", "QWEN.md", "WARP.md",
+                      "OPENWEIGHT.md", ".agents", ".gitignore", "scripts/multiagent.py"]:
+                if (repo / r).exists():
+                    git(repo, "add", r, check=False)
+            git(repo, "commit", "-m", "chore: install multi-agent workflow", check=False)
+            print("\nCommitted the workflow files so new worktrees carry them.")
+        else:
+            print("\nOne manual step left - commit the workflow files so worktrees carry them:")
+            print("  git add AGENTS.md CLAUDE.md WARP.md .agents scripts .gitignore && git commit -m \"install multi-agent workflow\"")
+            print("  (or just re-run:  multiagent.py ready --commit)")
+    print()
+    return doctor(repo)
 
 
 def examples() -> None:
@@ -1167,6 +1417,13 @@ def desktop_config(repo: Path, config_path: str | None, write: bool, server_name
     if not dirs:
         print("No active worktrees to expose. Dispatch some tasks first.")
         return
+    spaced = [d for d in dirs if " " in d]
+    if spaced:
+        print("Warning: these worktree paths contain spaces, which Claude Desktop's")
+        print("filesystem MCP server cannot handle. Use a space-free worktree_root:")
+        for d in spaced:
+            print(f"  {d}")
+        print()
     server = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", *dirs]}
     target = Path(config_path) if config_path else claude_desktop_config_path()
     if not write:
@@ -1297,8 +1554,11 @@ def build_parser() -> argparse.ArgumentParser:
     install_p = sub.add_parser("install")
     install_p.add_argument("--force", action="store_true")
     install_p.add_argument("--no-agent-files", action="store_true")
-    sub.add_parser("doctor", help="Check whether the repo is ready for multi-agent work.")
+    sub.add_parser("doctor", help="Readiness check: is the repo ready for multi-agent work? (READY/NOT READY)")
     sub.add_parser("examples", help="Show simple user commands and CLI examples.")
+    sub.add_parser("selftest", help="Run a built-in end-to-end self-test on a throwaway repo to prove the setup works.")
+    ready_p = sub.add_parser("ready", help="One command: install + hooks + readiness check.")
+    ready_p.add_argument("--commit", action="store_true", help="Also commit the workflow files so worktrees carry them.")
 
     dispatch_p = sub.add_parser("dispatch")
     dispatch_p.add_argument("--stream")
@@ -1344,10 +1604,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    # These do not need a target repo, so they work from anywhere.
+    if args.cmd == "examples":
+        examples()
+        return
+    if args.cmd == "selftest":
+        raise SystemExit(selftest())
     repo = repo_root(Path(args.repo).resolve())
-    # Coordination commands read manifests from the main checkout; resolve it so
-    # they also work when invoked from inside a worktree.
-    if args.cmd in {"board", "radar", "cleanup", "land", "launch", "status", "desktop-config"}:
+    # Coordination/readiness commands read manifests from the main checkout;
+    # resolve it so they also work when invoked from inside a worktree.
+    if args.cmd in {"board", "radar", "cleanup", "land", "launch", "status", "desktop-config", "doctor", "ready"}:
         repo = main_checkout(repo)
     if args.cmd == "inspect":
         inspect(repo)
@@ -1358,9 +1624,9 @@ def main() -> None:
     elif args.cmd == "install":
         install(repo, force=args.force, agent_files=not args.no_agent_files)
     elif args.cmd == "doctor":
-        doctor(repo)
-    elif args.cmd == "examples":
-        examples()
+        raise SystemExit(doctor(repo))
+    elif args.cmd == "ready":
+        raise SystemExit(ready(repo, args.commit))
     elif args.cmd == "dispatch":
         if args.from_file:
             dispatch_from(repo, Path(args.from_file), args.base, args.no_fetch, args.force)

@@ -38,3 +38,6 @@ jobs:
 
       - name: Desktop-app flow test (launch, desktop-config)
         run: python multi-agent-workflow/tests/test_desktop.py
+
+      - name: Readiness flow test (doctor, ready, selftest)
+        run: python multi-agent-workflow/tests/test_readiness.py

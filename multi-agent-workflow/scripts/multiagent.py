@@ -41,6 +41,87 @@ AGENT_TYPE_NOTES = {
     "openweight": "Openweight/local note: run shell commands from the worktree and ask before destructive or unclear actions.",
 }
 
+AGENT_ENTRYPOINTS = {
+    "CLAUDE.md": "Claude",
+    "GEMINI.md": "Gemini",
+    "ANTIGRAVITY.md": "Antigravity",
+    "QWEN.md": "Qwen",
+    "OPENWEIGHT.md": "Openweight/local agents",
+}
+
+AGENT_ENTRYPOINT_BODY = """\
+# {agent_name} Multi-Agent Workflow
+
+This repository uses a universal multi-agent workflow.
+
+Before editing:
+
+1. Read `AGENTS.md` if present.
+2. Read `.agents/workflow.md` if present.
+3. Read `.agents/quickstart.md` if you need the human workflow.
+4. If `.agents/current-task.md` exists, treat it as this worktree's active Task Card.
+5. Work only inside the paths allowed by the Task Card.
+6. Do not edit blocked paths or another agent's worktree.
+7. Run relevant checks before reporting completion.
+
+Final report:
+
+- changed files
+- checks run
+- risks/follow-ups
+- whether the branch is ready for PR/merge
+"""
+
+QUICKSTART_BODY = """\
+# Multi-Agent Quickstart
+
+This project is ready for parallel AI agent work.
+
+## Normal User Flow
+
+Talk normally to one orchestrator agent:
+
+```text
+Set up Claude for PDFM docs, Codex for Basket UI, and Qwen for tests.
+Keep Signal Bot and Luxalgo Bot untouched.
+```
+
+The orchestrator should create one Task Card, one branch, and one worktree per
+agent. You do not need a long prompt.
+
+## What To Tell Each Agent
+
+Open the generated worktree in Codex, Claude, Gemini, Antigravity, Qwen, or any
+local coding agent, then say:
+
+```text
+Please work on the current task in .agents/current-task.md.
+```
+
+That Task Card is the source of truth. The agent should stay inside the allowed
+paths, run checks, and report changed files, checks, and risks.
+
+## Useful Commands
+
+```powershell
+python scripts/multiagent.py doctor
+python scripts/multiagent.py status
+python scripts/multiagent.py examples
+```
+
+Dispatch example:
+
+```powershell
+python scripts/multiagent.py dispatch --stream docs --task "refresh PDFM docs" --agent claude-docs --agent-type claude --paths docs/
+```
+
+Close a merged task:
+
+```powershell
+python scripts/multiagent.py close --id <task-id>
+```
+"""
+
 
 def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, text=True, capture_output=True)
@@ -216,11 +297,36 @@ def write_default_config(repo: Path, force: bool = False) -> Path:
 
 def append_unique_lines(path: Path, lines: list[str]) -> None:
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    additions = [line for line in lines if line not in existing]
-    if not additions:
+    existing_lines = set(existing.splitlines())
+    additions = [line for line in lines if line == "" or line not in existing_lines]
+    if not any(line for line in additions):
         return
+    while additions and additions[-1] == "":
+        additions.pop()
     separator = "" if existing.endswith("\n") or not existing else "\n"
     path.write_text(existing + separator + "\n".join(additions) + "\n", encoding="utf-8")
+
+
+def write_agent_entrypoints(repo: Path, force: bool = False) -> None:
+    for filename, agent_name in AGENT_ENTRYPOINTS.items():
+        path = repo / filename
+        content = AGENT_ENTRYPOINT_BODY.format(agent_name=agent_name)
+        if not path.exists() or force:
+            path.write_text(content, encoding="utf-8")
+            continue
+        marker = "## Universal Multi-Agent Workflow"
+        existing = path.read_text(encoding="utf-8", errors="replace")
+        if marker not in existing:
+            append_unique_lines(
+                path,
+                [
+                    "",
+                    marker,
+                    "",
+                    "Read `AGENTS.md`, `.agents/workflow.md`, `.agents/quickstart.md`, and `.agents/current-task.md` before editing.",
+                    "Stay inside the Task Card's allowed paths and report changed files/checks/risks.",
+                ],
+            )
 
 
 def ensure_dirs(repo: Path) -> None:
@@ -232,7 +338,7 @@ def ensure_dirs(repo: Path) -> None:
             path.write_text("", encoding="utf-8")
 
 
-def install(repo: Path, force: bool = False) -> None:
+def install(repo: Path, force: bool = False, agent_files: bool = True) -> None:
     ensure_dirs(repo)
     config = write_default_config(repo, force=force)
     workflow = repo / ".agents" / "workflow.md"
@@ -256,6 +362,9 @@ def install(repo: Path, force: bool = False) -> None:
             ),
             encoding="utf-8",
         )
+    quickstart = repo / ".agents" / "quickstart.md"
+    if force or not quickstart.exists():
+        quickstart.write_text(QUICKSTART_BODY, encoding="utf-8")
     readme = repo / ".agents" / "README.md"
     if force or not readme.exists():
         readme.write_text(
@@ -269,7 +378,7 @@ def install(repo: Path, force: bool = False) -> None:
                 """\
                 # Agent Rules
 
-                Read `.agents/workflow.md` before starting work. Use one branch and one worktree per task.
+                Read `.agents/workflow.md` and `.agents/quickstart.md` before starting work. Use one branch and one worktree per task.
                 If `.agents/current-task.md` exists, read it before editing.
                 Stay inside the allowed paths in the current Task Card.
                 """
@@ -285,13 +394,18 @@ def install(repo: Path, force: bool = False) -> None:
                     "",
                     marker,
                     "",
-                    "Read `.agents/workflow.md`. If `.agents/current-task.md` exists, read it before editing and stay inside its allowed paths.",
+                    "Read `.agents/workflow.md` and `.agents/quickstart.md`. If `.agents/current-task.md` exists, read it before editing and stay inside its allowed paths.",
                 ],
             )
     append_unique_lines(repo / ".gitignore", ["", "# Multi-agent workflow runtime", *RUNTIME_GITIGNORE])
     shutil.copy2(Path(__file__).resolve(), repo / "scripts" / "multiagent.py")
+    if agent_files:
+        write_agent_entrypoints(repo, force=force)
     print(f"Installed universal multi-agent workflow in {repo}")
     print(f"Review config: {config}")
+    if agent_files:
+        print("Installed agent entry files: CLAUDE.md, GEMINI.md, ANTIGRAVITY.md, QWEN.md, OPENWEIGHT.md")
+    print("Next: use natural language in any agent, e.g. 'Please work on .agents/current-task.md'.")
 
 
 def inspect(repo: Path) -> None:
@@ -307,6 +421,9 @@ def inspect(repo: Path) -> None:
             "AGENTS.md",
             "CLAUDE.md",
             "GEMINI.md",
+            "ANTIGRAVITY.md",
+            "QWEN.md",
+            "OPENWEIGHT.md",
             ".agents/workflow-config.toml",
             ".agents/workflow.md",
             ".github/pull_request_template.md",
@@ -332,6 +449,57 @@ def inspect(repo: Path) -> None:
         print("- Run install, then review `.agents/workflow-config.toml` before dispatching agents.")
     else:
         print("- Review active task manifests with status before dispatching more work.")
+
+
+def doctor(repo: Path) -> None:
+    print("Multi-Agent Workflow Doctor")
+    print("===========================")
+    print(f"Repo: {repo}")
+    status_text = git(repo, "status", "--short", "--branch", check=False).stdout.strip()
+    print("\nGit status:")
+    print(status_text or "(clean)")
+
+    required = [
+        ".agents/workflow-config.toml",
+        ".agents/workflow.md",
+        ".agents/quickstart.md",
+        "scripts/multiagent.py",
+        "AGENTS.md",
+    ]
+    optional = list(AGENT_ENTRYPOINTS)
+    print("\nCore files:")
+    for rel in required:
+        print(f"- {'OK' if (repo / rel).exists() else 'MISSING'} {rel}")
+    print("\nAgent entry files:")
+    for rel in optional:
+        print(f"- {'OK' if (repo / rel).exists() else 'missing'} {rel}")
+    print("\nRuntime status:")
+    status(repo)
+
+
+def examples() -> None:
+    print(
+        textwrap.dedent(
+            """\
+            Natural-language user flow:
+
+              "Set up this repo for parallel Codex, Claude, Gemini, and Qwen work."
+              "Dispatch Claude for docs, Codex for frontend, and Qwen for tests."
+
+            CLI equivalents:
+
+              python scripts/multiagent.py setup
+              python scripts/multiagent.py doctor
+              python scripts/multiagent.py dispatch --stream docs --task "refresh docs" --agent claude-docs --agent-type claude --paths docs/
+              python scripts/multiagent.py dispatch --stream frontend --task "nav polish" --agent codex-ui --agent-type codex --paths src/Nav.tsx
+
+            After dispatch:
+
+              Open the generated worktree in the target agent and say:
+              "Please work on the current task in .agents/current-task.md."
+            """
+        )
+    )
 
 
 def task_root(repo: Path) -> Path:
@@ -561,8 +729,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("inspect")
+    setup_p = sub.add_parser("setup", help="Inspect and install the universal workflow in one simple command.")
+    setup_p.add_argument("--force", action="store_true")
+    setup_p.add_argument("--no-agent-files", action="store_true")
     install_p = sub.add_parser("install")
     install_p.add_argument("--force", action="store_true")
+    install_p.add_argument("--no-agent-files", action="store_true")
+    sub.add_parser("doctor", help="Check whether the repo is ready for multi-agent work.")
+    sub.add_parser("examples", help="Show simple user commands and CLI examples.")
 
     dispatch_p = sub.add_parser("dispatch")
     dispatch_p.add_argument("--stream", required=True)
@@ -591,8 +765,16 @@ def main() -> None:
     repo = repo_root(Path(args.repo).resolve())
     if args.cmd == "inspect":
         inspect(repo)
+    elif args.cmd == "setup":
+        inspect(repo)
+        print("\n--- Installing workflow ---")
+        install(repo, force=args.force, agent_files=not args.no_agent_files)
     elif args.cmd == "install":
-        install(repo, force=args.force)
+        install(repo, force=args.force, agent_files=not args.no_agent_files)
+    elif args.cmd == "doctor":
+        doctor(repo)
+    elif args.cmd == "examples":
+        examples()
     elif args.cmd == "dispatch":
         dispatch(args, repo)
     elif args.cmd == "status":

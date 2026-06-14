@@ -60,6 +60,12 @@ Never overwrite project-specific `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, IDE
 rules, PR templates, or scripts without checking whether they contain existing
 local rules.
 
+If adapter files are missing, the installer can create thin universal adapters
+for Claude, Gemini, Antigravity, Qwen, and openweight/local agents. These should
+point back to `.agents/current-task.md` rather than creating separate workflows.
+The installer should also create `.agents/quickstart.md` so non-technical users
+have a short, repo-local operating guide.
+
 ## Publish Decision
 
 Before pushing:

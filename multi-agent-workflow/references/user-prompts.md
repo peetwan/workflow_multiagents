@@ -22,6 +22,9 @@ give me task worktrees for each agent.
 ## Dispatch Examples
 
 ```powershell
+python scripts/multiagent.py setup
+python scripts/multiagent.py doctor
+python scripts/multiagent.py examples
 python scripts/multiagent.py dispatch --stream docs --task "refresh deployment docs" --agent claude-docs --agent-type claude --paths "docs/deploy.md"
 ```
 
@@ -45,6 +48,21 @@ Follow the repo workflow and stay inside the allowed paths.
 
 Use the `handoff` command only when an agent cannot read files from the worktree
 and needs handoff text pasted manually.
+
+## For Normal Users
+
+They do not need to remember the CLI. They can ask the orchestrating agent:
+
+```text
+Set this repo up for multi-agent work, then create one Claude task for docs and
+one Qwen task for tests.
+```
+
+The orchestrating agent should run setup/dispatch and tell the user which
+worktree to open in each tool.
+
+The generated `.agents/quickstart.md` is the human-readable fallback. If the
+user is unsure, point them there before asking them to remember commands.
 
 ## Generated Task Card Shape
 

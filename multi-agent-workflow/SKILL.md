@@ -1,6 +1,6 @@
 ---
 name: multi-agent-workflow
-description: Design, install, and operate safe, agent-neutral parallel AI workflows across any Git repository. Use when the user wants to speak in natural language and have multiple Codex, Claude, Gemini, Antigravity, Qwen, openweight/open-source models, or other coding agents work at the same time without overwriting each other; wants a universal worktree/branch/task-card dispatch system; wants repo-local task files, path ownership, preflight checks, or GitHub publishing guidance for multi-agent development.
+description: Design, install, and operate safe, agent-neutral parallel AI workflows across any Git repository. Use when the user wants to speak in natural language and have multiple Codex, Claude, Gemini, Antigravity, Qwen, openweight/open-source models, or other coding agents work at the same time without overwriting each other; wants a universal worktree/branch/task-card dispatch system; wants repo-local adapter files such as AGENTS.md, CLAUDE.md, GEMINI.md, ANTIGRAVITY.md, QWEN.md, or OPENWEIGHT.md; wants path ownership, preflight checks, or GitHub publishing guidance for multi-agent development.
 ---
 
 # Multi-Agent Workflow
@@ -45,13 +45,14 @@ one user request = one task card = one agent = one branch = one worktree = one m
    Prefer the script for deterministic setup:
 
    ```powershell
-   python <skill>/scripts/multiagent.py install --repo <repo>
+   python <skill>/scripts/multiagent.py setup --repo <repo>
    ```
 
    This creates `.agents/`, `.agents/workflow-config.toml`,
-   `.agents/workflow.md`, a local `scripts/multiagent.py`, runtime ignore rules,
-   and non-destructive agent guidance. Review the generated config before using
-   broad streams.
+   `.agents/workflow.md`, `.agents/quickstart.md`, a local
+   `scripts/multiagent.py`, runtime ignore rules, universal `AGENTS.md`, and
+   adapter files for Claude, Gemini, Antigravity, Qwen, and openweight/local
+   agents. Review the generated config before using broad streams.
 
 4. **Dispatch agents with narrow paths and Task Cards.**
    Prefer exact files or folders for concurrent work in the same stream:
@@ -96,8 +97,8 @@ Ask before proceeding when:
 
 ## Bundled Resources
 
-- `scripts/multiagent.py`: cross-project CLI for inspect, install, dispatch,
-  status, task handoff, and close operations.
+- `scripts/multiagent.py`: cross-project CLI for inspect, setup, install,
+  doctor, examples, dispatch, status, task handoff, and close operations.
 - `references/repo-audit.md`: repo inspection and install decision checklist.
 - `references/parallel-patterns.md`: detailed workflow patterns and merge rules.
 - `references/agent-adapters.md`: notes for Codex, Claude, Gemini,

@@ -41,8 +41,23 @@ Do not dispatch an agent unless the Task Card includes:
 
 ## Tool-Specific Files
 
-Prefer a universal `AGENTS.md`, `.agents/workflow.md`, and per-worktree
-`.agents/current-task.md`. Add tool-specific files such as `CLAUDE.md`,
+Prefer a universal `AGENTS.md`, `.agents/workflow.md`,
+`.agents/quickstart.md`, and per-worktree `.agents/current-task.md`.
+Add tool-specific files such as `CLAUDE.md`,
 `GEMINI.md`, or IDE rules only when the project already uses them or the user
 asks for them. Avoid duplicating rules in many files unless the tool will
 actually read them.
+
+The installer creates lightweight adapter files by default:
+
+```text
+CLAUDE.md
+GEMINI.md
+ANTIGRAVITY.md
+QWEN.md
+OPENWEIGHT.md
+```
+
+These are intentionally thin. They point each agent back to `AGENTS.md`,
+`.agents/workflow.md`, `.agents/quickstart.md`, and `.agents/current-task.md`
+instead of creating different rules for every tool.

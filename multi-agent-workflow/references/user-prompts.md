@@ -1,4 +1,4 @@
-# User And Agent Prompt Examples
+# User Commands And Task Cards
 
 ## Natural Language User Requests
 
@@ -16,7 +16,7 @@ task for tests. Keep them in separate worktrees.
 
 ```text
 Check this repo first, install the multi-agent workflow if it makes sense, then
-give me copy-paste prompts for each agent.
+give me task worktrees for each agent.
 ```
 
 ## Dispatch Examples
@@ -33,10 +33,26 @@ python scripts/multiagent.py dispatch --stream frontend --task "mobile nav polis
 python scripts/multiagent.py dispatch --stream tests --task "add edge cases" --agent qwen-tests --agent-type qwen --paths "tests/"
 ```
 
-## Generated Agent Prompt Shape
+## Natural Agent Command
+
+After dispatch, open the generated worktree in the target agent and speak
+normally:
 
 ```text
+Please work on the current task in `.agents/current-task.md`.
+Follow the repo workflow and stay inside the allowed paths.
+```
+
+Use the `handoff` command only when an agent cannot read files from the worktree
+and needs handoff text pasted manually.
+
+## Generated Task Card Shape
+
+```text
+# Current Agent Task
+
 You are working as: claude-docs
+Agent runtime: claude
 Task: refresh deployment docs
 Stream: docs
 Branch: agent/docs/20260614-claude-docs-refresh-deployment-docs
@@ -46,7 +62,8 @@ C:\path\to\_worktrees\docs\20260614-claude-docs-refresh-deployment-docs
 Before touching files:
 1. Read AGENTS.md if present.
 2. Read .agents/workflow.md if present.
-3. Run git status --short --branch.
+3. Treat this file as the source of truth for this worktree's current task.
+4. Run git status --short --branch.
 
 Allowed paths:
 - docs/deploy.md

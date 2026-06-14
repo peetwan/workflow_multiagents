@@ -1,4 +1,4 @@
 interface:
   display_name: "Multi-Agent Workflow"
   short_description: "Universal parallel agent workflow"
-  default_prompt: "Use $multi-agent-workflow to inspect this repo and set up safe parallel worktrees for Codex, Claude, Gemini, Antigravity, Qwen, or other agents."
+  default_prompt: "Use $multi-agent-workflow to inspect this repo and dispatch safe task-card worktrees for Codex, Claude, Gemini, Antigravity, Qwen, or other agents."

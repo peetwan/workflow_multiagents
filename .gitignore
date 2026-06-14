@@ -1,5 +1,5 @@
 __pycache__/
 *.py[cod]
 .agents/tasks/*.json
-.agents/tasks/*.prompt.md
+.agents/tasks/*.handoff.md
 .agents/locks/*.lock

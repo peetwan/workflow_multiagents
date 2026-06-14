@@ -3,7 +3,7 @@
 ## Core Model
 
 ```text
-one task -> one agent -> one branch -> one worktree -> one manifest
+one user request -> one task card -> one agent -> one branch -> one worktree -> one manifest
 ```
 
 Keep the main checkout as the integration surface. Agents work in sibling
@@ -21,8 +21,9 @@ repo-parent/
       20260614-codex-auth-fix/
 ```
 
-Runtime coordination state stays in the repo under `.agents/tasks/`, but task
-manifests and generated prompts are ignored by git.
+Runtime coordination state stays in the repo under `.agents/tasks/`, while each
+worktree gets its own ignored `.agents/current-task.md` Task Card. Manifests,
+handoff copies, and Task Cards are ignored by git.
 
 ## Branch Names
 
@@ -53,9 +54,9 @@ If a task needs shared files, assign one owner and make other agents wait.
 ## Mixed Agent Usage
 
 Different programs do not share chat context. Codex, Claude, Gemini,
-Antigravity, Qwen, and openweight/local agents should all receive a complete
-dispatch prompt. Paste the generated dispatch prompt into each program. The
-prompt must include:
+Antigravity, Qwen, and openweight/local agents should all open their own
+generated worktree and read `.agents/current-task.md`. The Task Card must
+include:
 
 - exact worktree path
 - branch
@@ -64,8 +65,9 @@ prompt must include:
 - verification command/expectation
 - final report format
 
-Tell each tool to open or work only in its own worktree. The main checkout is
-for coordination and integration only.
+Tell each tool in natural language to work from the current Task Card. The main
+checkout is for coordination and integration only. Handoff text is a fallback
+for tools that cannot read files directly.
 
 ## Verification
 

@@ -82,6 +82,16 @@ When they finish, run `python scripts/multiagent.py guard` to confirm none of
 them edited outside its lane, then merge. Commit the workflow files once before
 dispatching (the installer creates them); `dispatch` warns if you forget.
 
+## Proven Better Than a Shared Checkout
+
+`multi-agent-workflow/tests/test_vs_baseline.py` is an A/B test. It reproduces
+what goes wrong when two agents share one working tree — one agent's
+`git add -A && git commit` sweeps in the other's in-progress files, and two edits
+to the same file silently clobber each other — then runs the same two tasks with
+the workflow and shows worktrees prevent both. Baseline fails 2/2; the workflow
+fails 0. `tests/test_workflow.py` separately proves the features (setup, dispatch,
+overlap block, guard, multi-program discovery): 35 checks.
+
 ## Agent Support
 
 The workflow is not limited to one tool. Installing it into a project creates a

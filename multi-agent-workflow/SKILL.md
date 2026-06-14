@@ -160,8 +160,12 @@ Ask before proceeding when:
   doctor, examples, dispatch, status, task handoff, guard (anti-collision
   check), and close operations.
 - `tests/test_workflow.py`: end-to-end test on a throwaway repo proving universal
-  setup, one-line dispatch, dispatch-time overlap blocking, and guard catching
-  out-of-lane edits. Run `python tests/test_workflow.py`.
+  setup, one-line dispatch, dispatch-time overlap blocking, guard catching
+  out-of-lane edits, and multi-program discovery. Run `python tests/test_workflow.py`.
+- `tests/test_vs_baseline.py`: A/B test proving the workflow beats NOT using it.
+  It reproduces the two failures of a shared working tree (one agent's commit
+  sweeping in another's in-progress files; silent same-file clobber) and shows
+  worktrees prevent both. Run `python tests/test_vs_baseline.py`.
 - `references/repo-audit.md`: repo inspection and install decision checklist.
 - `references/parallel-patterns.md`: detailed workflow patterns and merge rules.
 - `references/agent-adapters.md`: notes for Codex, Claude, Gemini,

@@ -1419,6 +1419,28 @@ def claude_desktop_config_path() -> Path:
     return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
 
 
+def codex_config_path() -> Path:
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _write_codex_server(target: Path, name: str, command: str, args: list) -> tuple[bool, str]:
+    """Append a [mcp_servers.<name>] block to a Codex config.toml. Append-only and
+    idempotent: if the block is already there it is left unchanged (we never
+    rewrite existing TOML, to stay safe)."""
+    block = (f"[mcp_servers.{name}]\n"
+             f"command = {json.dumps(command)}\n"
+             f"args = {json.dumps(args)}\n")
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    if f"[mcp_servers.{name}]" in existing:
+        return False, "already present (left unchanged)"
+    if target.exists():
+        shutil.copy2(target, target.with_suffix(target.suffix + ".bak"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = (existing.rstrip() + "\n\n" + block) if existing.strip() else block
+    target.write_text(body, encoding="utf-8")
+    return True, str(target)
+
+
 def desktop_config(repo: Path, config_path: str | None, write: bool, server_name: str = "filesystem") -> None:
     """Emit (or merge) a Claude Desktop filesystem-MCP config that grants the app
     access to every active worktree, so a desktop agent can edit them. Prints the
@@ -1498,8 +1520,25 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 
+# Write actions are opt-in (serve-mcp --allow-actions) so a read-only server is
+# the safe default.
+MCP_ACTION_TOOLS = [
+    {"name": "dispatch_task",
+     "description": "Create an isolated worktree + branch + Task Card for a new agent task. Returns the handoff (which folder to open).",
+     "inputSchema": {"type": "object", "properties": {
+         "stream": {"type": "string", "description": "stream/area, e.g. frontend, backend, docs"},
+         "task": {"type": "string", "description": "short task description"},
+         "agent": {"type": "string", "description": "agent label, e.g. claude-desktop, codex-desktop"},
+         "paths": {"type": "array", "items": {"type": "string"},
+                   "description": "files or folders this task may edit (optional; defaults to the stream's)"}},
+      "required": ["stream", "task", "agent"]}},
+    {"name": "close_task",
+     "description": "Mark a task closed (releases its path ownership). Does NOT delete the worktree.",
+     "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
+]
 
-def serve_mcp(repo: Path) -> None:
+
+def serve_mcp(repo: Path, allow_actions: bool = False) -> None:
     """A minimal, dependency-free MCP server (stdio, newline-delimited JSON-RPC).
 
     Lets MCP clients (Claude Desktop, Codex) use the workflow from a chat: list
@@ -1561,6 +1600,19 @@ def serve_mcp(repo: Path) -> None:
             p = a.get("path", "")
             m = next((x for x in active_manifests(repo) if _path_under(p, x.get("worktreePath", ""))), None)
             return card_for(m) if m else f"No active task owns '{p}'. Use list_tasks to see tasks."
+        if name == "dispatch_task":
+            if not allow_actions:
+                return "dispatch_task is disabled (read-only server). Enable with: mcp-config --actions --write"
+            stream, task, agent = a.get("stream"), a.get("task"), a.get("agent")
+            if not (stream and task and agent):
+                return "dispatch_task needs stream, task, and agent."
+            extra = (["--paths", *[str(p) for p in a["paths"]]] if a.get("paths") else [])
+            return run_cmd("dispatch", "--stream", str(stream), "--task", str(task), "--agent", str(agent), *extra)
+        if name == "close_task":
+            if not allow_actions:
+                return "close_task is disabled (read-only server). Enable with: mcp-config --actions --write"
+            tid = a.get("task_id")
+            return run_cmd("close", "--id", str(tid)) if tid else "close_task needs task_id."
         raise ValueError(f"unknown tool: {name}")
 
     for raw in sys.stdin:
@@ -1578,7 +1630,7 @@ def serve_mcp(repo: Path) -> None:
                 reply(mid, {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
                             "serverInfo": {"name": "multiagent-workflow", "version": "1"}})
             elif method == "tools/list":
-                reply(mid, {"tools": MCP_TOOLS})
+                reply(mid, {"tools": MCP_TOOLS + (MCP_ACTION_TOOLS if allow_actions else [])})
             elif method == "tools/call":
                 params = req.get("params", {}) or {}
                 try:
@@ -1595,12 +1647,14 @@ def serve_mcp(repo: Path) -> None:
             continue
 
 
-def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool) -> None:
+def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool,
+               actions: bool = False, codex_config: str | None = None) -> None:
     """Register the workflow with MCP clients so desktop apps use it from a chat:
     a shared 'filesystem' server (worktree file access) and a per-repo
     'multiagent-<repo>' server (task-awareness, so several repos coexist). Prints
     the Claude Desktop JSON, or --write merges AND verifies it; --codex prints
-    the Codex config.toml snippet."""
+    (and with --write merges) the Codex config.toml block; --actions also enables
+    the dispatch_task/close_task write tools."""
     repo = Path(repo).resolve()
     dirs: list[str] = []
     for m in active_manifests(repo):
@@ -1615,7 +1669,7 @@ def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool) ->
     # Prefer the repo-local copy: it travels with the project and stays valid
     # across reboots even if the skill source moves.
     script = str(local.resolve()) if local.exists() else str(Path(__file__).resolve())
-    ma_args = [script, "--repo", str(repo), "serve-mcp"]
+    ma_args = [script, "--repo", str(repo), "serve-mcp"] + (["--allow-actions"] if actions else [])
     ma_server = {"command": sys.executable, "args": ma_args}
     fs_server = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", *dirs]}
 
@@ -1627,11 +1681,17 @@ def mcp_config(repo: Path, config_path: str | None, write: bool, codex: bool) ->
         print()
 
     if codex:
+        ctarget = Path(codex_config) if codex_config else codex_config_path()
         print("# Codex: add to ~/.codex/config.toml (Codex supports stdio MCP servers):\n")
         print(f"[mcp_servers.{server_name}]")
         print(f"command = {json.dumps(sys.executable)}")
         print(f"args = {json.dumps(ma_args)}")
         print()
+        if write:
+            changed, detail = _write_codex_server(ctarget, server_name, sys.executable, ma_args)
+            print(f"Codex config: {('wrote ' + detail) if changed else (server_name + ' ' + detail)}")
+            cok, cdetail = _mcp_handshake(sys.executable, ma_args)
+            print(f"  health check: [{'OK' if cok else 'FAILED'}] {cdetail}\n")
 
     target = Path(config_path) if config_path else claude_desktop_config_path()
     new_servers = {server_name: ma_server}
@@ -1709,50 +1769,68 @@ def _mcp_handshake(command, args, timeout=20):
     return False, f"no handshake (exit {proc.returncode})" + (f"; {err[-1][:120]}" if err else "")
 
 
-def mcp_check(repo: Path, config_path: str | None, name: str | None) -> int:
+def mcp_check(repo: Path, config_path: str | None, name: str | None,
+              codex: bool = False, codex_config: str | None = None) -> int:
     """Live health check: spawn the registered MCP server(s) and confirm they
-    respond. Run it anytime (e.g. after a reboot or app restart) to know the
-    server still works. Returns 0 when all checked servers respond."""
-    target = Path(config_path) if config_path else claude_desktop_config_path()
+    respond. Run it anytime (e.g. after a reboot or app restart). Checks Claude
+    Desktop by default; --codex also checks the Codex config.toml. Returns 0 when
+    every checked server responds."""
     print("MCP health check")
     print("=" * 32)
-    servers = {}
+    stats = {"total": 0, "failed": 0}
+
+    def check_items(items, source):
+        for n, s in items:
+            stats["total"] += 1
+            if not isinstance(s, dict) or not s.get("command"):
+                print(f"  [X] {n} ({source}): malformed entry")
+                stats["failed"] += 1
+                continue
+            ok, detail = _mcp_handshake(s["command"], s.get("args", []))
+            print(f"  [{'OK' if ok else 'X'}] {n} ({source}) -> {detail}")
+            if not ok:
+                stats["failed"] += 1
+
+    target = Path(config_path) if config_path else claude_desktop_config_path()
+    cd_servers = {}
     if target.exists():
         try:
-            servers = json.loads(target.read_text(encoding="utf-8")).get("mcpServers", {})
+            cd_servers = json.loads(target.read_text(encoding="utf-8")).get("mcpServers", {})
         except json.JSONDecodeError:
-            print(f"  [X] config is not valid JSON: {target}")
-            return 1
+            print(f"  [X] Claude Desktop config is not valid JSON: {target}")
+            stats["failed"] += 1
     if name:
-        items = [(name, servers[name])] if name in servers else []
+        check_items([(name, cd_servers[name])] if name in cd_servers else [], "claude")
     else:
-        items = [(n, s) for n, s in servers.items() if n.startswith("multiagent")]
-    if not items:
+        check_items([(n, s) for n, s in cd_servers.items() if str(n).startswith("multiagent")], "claude")
+
+    if codex:
+        ctarget = Path(codex_config) if codex_config else codex_config_path()
+        if ctarget.exists():
+            try:
+                cx = load_toml(ctarget).get("mcp_servers", {})
+            except Exception:  # noqa: BLE001 - a malformed codex config must not crash the check
+                cx = {}
+            check_items([(n, s) for n, s in cx.items() if str(n).startswith("multiagent")], "codex")
+        else:
+            print(f"  [i] Codex config not found: {ctarget}")
+
+    if stats["total"] == 0:
         local = repo / "scripts" / "multiagent.py"
         script = str(local.resolve()) if local.exists() else str(Path(__file__).resolve())
-        print(f"  no registered multiagent server in {target};")
-        print("  checking the current repo's server directly:")
+        print("  no registered multiagent server found; checking the current repo directly:")
         ok, detail = _mcp_handshake(sys.executable, [script, "--repo", str(Path(repo).resolve()), "serve-mcp"])
         print(f"  [{'OK' if ok else 'X'}] current repo -> {detail}")
         if ok:
-            print("  Register it for Claude Desktop with:  multiagent.py mcp-config --write")
+            print("  Register it with:  multiagent.py mcp-config --write")
         return 0 if ok else 1
-    failed = 0
-    for n, s in items:
-        if not isinstance(s, dict) or not s.get("command"):
-            print(f"  [X] {n}: malformed entry")
-            failed += 1
-            continue
-        ok, detail = _mcp_handshake(s["command"], s.get("args", []))
-        print(f"  [{'OK' if ok else 'X'}] {n} -> {detail}")
-        if not ok:
-            failed += 1
+
     print("=" * 32)
-    if failed:
-        print(f"  {failed}/{len(items)} server(s) FAILED. Re-run: multiagent.py mcp-config --write")
+    if stats["failed"]:
+        print(f"  {stats['failed']}/{stats['total']} server(s) FAILED. Re-run: multiagent.py mcp-config --write")
         return 1
-    print(f"  All {len(items)} multiagent server(s) respond - working.")
-    print("  In Claude Desktop you can also type /mcp in a chat to see the live connection.")
+    print(f"  All {stats['total']} multiagent server(s) respond - working.")
+    print("  In the app you can also type /mcp in a chat to see the live connection.")
     return 0
 
 
@@ -1898,14 +1976,19 @@ def build_parser() -> argparse.ArgumentParser:
     dc_p.add_argument("--config", help="Target config file (default: this OS's claude_desktop_config.json).")
     dc_p.add_argument("--write", action="store_true", help="Merge into the target config file (a .bak backup is kept).")
     dc_p.add_argument("--server-name", default="filesystem")
-    sub.add_parser("serve-mcp", help="Run as an MCP server (stdio) so Claude Desktop / Codex can use the workflow from a chat.")
+    serve_p = sub.add_parser("serve-mcp", help="Run as an MCP server (stdio) so Claude Desktop / Codex can use the workflow from a chat.")
+    serve_p.add_argument("--allow-actions", action="store_true", help="Also expose dispatch_task/close_task write tools.")
     mcp_p = sub.add_parser("mcp-config", help="Register the workflow as MCP servers (filesystem + multiagent) for Claude Desktop / Codex.")
     mcp_p.add_argument("--config", help="Target config file (default: this OS's claude_desktop_config.json).")
     mcp_p.add_argument("--write", action="store_true", help="Merge into the target config file (a .bak backup is kept).")
-    mcp_p.add_argument("--codex", action="store_true", help="Also print the Codex config.toml snippet.")
+    mcp_p.add_argument("--codex", action="store_true", help="Also print (and with --write, merge) the Codex config.toml block.")
+    mcp_p.add_argument("--codex-config", help="Codex config file (default: ~/.codex/config.toml).")
+    mcp_p.add_argument("--actions", action="store_true", help="Register the server with write tools (dispatch_task/close_task) enabled.")
     check_p = sub.add_parser("mcp-check", help="Live health check: spawn the registered MCP server(s) and confirm they respond.")
     check_p.add_argument("--config", help="Config file to read servers from (default: claude_desktop_config.json).")
     check_p.add_argument("--name", help="Check only this server name.")
+    check_p.add_argument("--codex", action="store_true", help="Also check the Codex config.toml servers.")
+    check_p.add_argument("--codex-config", help="Codex config file (default: ~/.codex/config.toml).")
     sub.add_parser("land", help="Print a read-only merge plan (order, overlaps, verify reminders).")
     return parser
 
@@ -1925,7 +2008,7 @@ def main() -> None:
             base = main_checkout(repo_root(Path(args.repo).resolve()))
         except SystemExit:
             base = Path(args.repo).resolve()
-        serve_mcp(base)
+        serve_mcp(base, allow_actions=args.allow_actions)
         return
     repo = repo_root(Path(args.repo).resolve())
     # Coordination/readiness commands read manifests from the main checkout;
@@ -1977,9 +2060,9 @@ def main() -> None:
     elif args.cmd == "desktop-config":
         desktop_config(repo, args.config, args.write, args.server_name)
     elif args.cmd == "mcp-config":
-        mcp_config(repo, args.config, args.write, args.codex)
+        mcp_config(repo, args.config, args.write, args.codex, args.actions, args.codex_config)
     elif args.cmd == "mcp-check":
-        raise SystemExit(mcp_check(repo, args.config, args.name))
+        raise SystemExit(mcp_check(repo, args.config, args.name, args.codex, args.codex_config))
     elif args.cmd == "land":
         land(repo)
 

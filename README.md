@@ -111,10 +111,15 @@ Claude Desktop: `filesystem` (file access to the worktrees) and `multiagent` (a
 tiny stdio server that exposes the workflow). After a restart you can ask, in a
 normal chat — **no terminal, no copy-paste** — things like *"what are my
 multi-agent tasks?"* or *"what should I work on in this folder?"*. Claude Desktop
-calls the MCP tools (`list_tasks`, `task_card`, `which_task`, `board`, `guard`,
-`radar`) and reads the Task Card itself. Add `--codex` to also print the
-`~/.codex/config.toml` block — Codex supports stdio MCP servers too, so the same
-server works there.
+calls the MCP tools and reads the Task Card itself. The read tools are
+`list_tasks`, `task_card`, `which_task`, `board`, `guard`, `radar`.
+
+Add `mcp-config --actions` to also expose **write** tools — `dispatch_task` and
+`close_task` — so you can set up and close tasks from the chat itself. Write
+actions are **off by default** for safety. For Codex, `mcp-config --codex` prints
+the `~/.codex/config.toml` block and `--codex --write` merges it in (with a
+backup); Codex supports stdio MCP servers too, so the same server works there.
+`mcp-check --codex` health-checks the Codex side as well.
 
 The server is **dependency-free** (hand-rolled newline-delimited JSON-RPC) and
 its tools shell out to the same tested CLI, so the server's stdout stays pure

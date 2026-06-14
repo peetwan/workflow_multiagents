@@ -47,3 +47,6 @@ jobs:
 
       - name: MCP stability test (bad repo, garbage, mcp-check, multi-repo)
         run: python multi-agent-workflow/tests/test_mcp_stability.py
+
+      - name: MCP actions + Codex test (dispatch/close from chat, codex write)
+        run: python multi-agent-workflow/tests/test_mcp_actions.py

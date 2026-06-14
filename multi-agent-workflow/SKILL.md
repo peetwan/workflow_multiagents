@@ -185,6 +185,8 @@ Ask before proceeding when:
   (initialize / tools/list / tools/call) and tests mcp-config registration.
 - `tests/test_mcp_stability.py`: server survives a bad repo and garbage input;
   mcp-check reports OK/FAIL without hanging; per-repo servers coexist.
+- `tests/test_mcp_actions.py`: opt-in dispatch_task/close_task write tools (run
+  the lifecycle from a chat) and the Codex config.toml write + check parity.
 - `tests/test_vs_baseline.py`: A/B test proving the workflow beats NOT using it.
   It reproduces the two failures of a shared working tree (one agent's commit
   sweeping in another's in-progress files; silent same-file clobber) and shows

@@ -82,6 +82,28 @@ When they finish, run `python scripts/multiagent.py guard` to confirm none of
 them edited outside its lane, then merge. Commit the workflow files once before
 dispatching (the installer creates them); `dispatch` warns if you forget.
 
+## Desktop Apps (Claude Desktop / Codex Desktop)
+
+Several of these agents also run as **desktop apps** — chat apps, not terminals,
+so you cannot `cd` into a worktree. Name the agent so the type is clear
+(`claude-desktop`, `codex-desktop`) and `launch` prints the right steps instead
+of a useless `cd && claude`:
+
+- **Claude Desktop** reaches local files through a filesystem MCP server. Run
+  `python scripts/multiagent.py desktop-config --write` once — it adds every
+  active worktree to your `claude_desktop_config.json` (a `.bak` is kept). After
+  restarting Claude Desktop, open a chat and say *"Work on the current task in
+  .agents/current-task.md"* for the worktree that task owns.
+- **Codex Desktop** opens a project pinned to a folder: start a new project whose
+  working directory is the printed worktree path. (Codex Desktop has had
+  out-of-project edits; the worktree plus the `install-hooks` guard contain the
+  blast radius.)
+- **Warp** is a terminal, so the CLI flow works: `cd` into the worktree and run
+  Claude Code / Codex there.
+
+`launch` prints all of this per task; `desktop-config` prints (or `--write`
+merges) the Claude Desktop filesystem config for every worktree at once.
+
 ## Proven Better Than a Shared Checkout
 
 `multi-agent-workflow/tests/test_vs_baseline.py` is an A/B test. It reproduces

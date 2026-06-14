@@ -41,6 +41,8 @@ AGENT_TYPE_NOTES = {
     "antigravity": "Antigravity note: attach/open the generated worktree as the project workspace before starting.",
     "qwen": "Qwen note: treat this Task Card as the full contract and avoid broad rewrites outside the allowed paths.",
     "warp": "Warp note: open this worktree folder in your Warp session. Warp reads AGENTS.md and the Task Card; keep edits inside the allowed paths.",
+    "claude-desktop": "Claude Desktop note: this is a chat app, not a CLI. Grant it filesystem access to this worktree (claude_desktop_config.json; see `multiagent.py desktop-config`), open a NEW chat, paste the Task Card path, and edit only inside the worktree.",
+    "codex-desktop": "Codex Desktop note: open a NEW project/thread whose working directory is this worktree. It pins the absolute path, so do not move the folder, and keep edits inside it (the guard hook contains any out-of-project edit).",
     "openweight": "Openweight/local note: run shell commands from the worktree and ask before destructive or unclear actions.",
 }
 
@@ -642,6 +644,11 @@ def make_task_card(
 def infer_agent_type(agent: str) -> str:
     """Guess the runtime from the agent label so --agent-type can be omitted."""
     name = (agent or "").lower()
+    if "desktop" in name:
+        if "codex" in name:
+            return "codex-desktop"
+        if "claude" in name:
+            return "claude-desktop"
     for kind in ("antigravity", "openweight", "codex", "claude", "gemini", "qwen", "warp"):
         if kind in name:
             return kind
@@ -1103,22 +1110,93 @@ def launch(repo: Path, task_id: str | None, do_open: bool) -> None:
         print("No active tasks.")
         return
     cli_cmd = {"claude": "claude", "codex": "codex", "gemini": "gemini", "qwen": "qwen"}
+    say = "Work on the current task in .agents/current-task.md"
     for m in active:
         wt = m.get("worktreePath", "")
         at = m.get("agentType", "generic")
         print(f"\n[{m.get('id')}] {m.get('stream')} -> {m.get('agent')} ({at})")
-        if at in cli_cmd:
+        if at == "claude-desktop":
+            print("  Claude Desktop (chat app, not a terminal):")
+            print("    1. grant it filesystem access to this folder (run: multiagent.py desktop-config --write):")
+            print(f"         {wt}")
+            print("    2. open a NEW chat and say:")
+            print(f"         {say}   (the folder is {wt})")
+        elif at == "codex-desktop":
+            print("  Codex Desktop (chat app, not a terminal):")
+            print("    1. New project/thread -> set its working directory to:")
+            print(f"         {wt}")
+            print(f"    2. then say:  {say}")
+        elif at in cli_cmd:
             print(f'  cd "{wt}" && {cli_cmd[at]}')
+            print(f"  then say: {say}")
         elif at == "warp":
             print(f"  open a new Warp tab in:  {wt}")
+            print(f"  then say: {say}")
         else:
             print(f'  cd "{wt}"   # then start your agent here')
-        print("  then say: Work on the current task in .agents/current-task.md")
+            print(f"  then say: {say}")
         if do_open:
             opener = "explorer" if os.name == "nt" else ("open" if sys.platform == "darwin" else "xdg-open")
             run([opener, wt], check=False)
+    if any(m.get("agentType") in {"claude-desktop", "codex-desktop"} for m in active):
+        print("\nFor Claude Desktop, run `multiagent.py desktop-config` once to grant it access to every worktree at once.")
     if do_open:
         print("\nOpened each worktree folder in your file manager.")
+
+
+def claude_desktop_config_path() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(base) / "Claude" / "claude_desktop_config.json"
+    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def desktop_config(repo: Path, config_path: str | None, write: bool, server_name: str = "filesystem") -> None:
+    """Emit (or merge) a Claude Desktop filesystem-MCP config that grants the app
+    access to every active worktree, so a desktop agent can edit them. Prints the
+    snippet by default; --write merges it into the target config file (backup kept)."""
+    dirs: list[str] = []
+    for m in active_manifests(repo):
+        wt = m.get("worktreePath", "")
+        if wt and Path(wt).exists():
+            rp = str(Path(wt).resolve())
+            if rp not in dirs:
+                dirs.append(rp)
+    if not dirs:
+        print("No active worktrees to expose. Dispatch some tasks first.")
+        return
+    server = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", *dirs]}
+    target = Path(config_path) if config_path else claude_desktop_config_path()
+    if not write:
+        print("Add this 'filesystem' server to your Claude Desktop config so it can")
+        print("reach every worktree, then restart Claude Desktop:\n")
+        print(json.dumps({"mcpServers": {server_name: server}}, indent=2))
+        print(f"\nConfig file (this OS): {target}")
+        print("Or merge automatically with:  multiagent.py desktop-config --write")
+        return
+    data: dict[str, Any] = {}
+    if target.exists():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raise SystemExit(f"Existing config is not valid JSON: {target}")
+        backup = target.with_suffix(target.suffix + ".bak")
+        shutil.copy2(target, backup)
+        print(f"Backed up existing config to {backup}")
+    servers = data.setdefault("mcpServers", {})
+    existing = servers.get(server_name)
+    if isinstance(existing, dict) and isinstance(existing.get("args"), list):
+        for d in dirs:
+            if d not in existing["args"]:
+                existing["args"].append(d)
+    else:
+        servers[server_name] = server
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    print(f"Granted Claude Desktop filesystem access to {len(dirs)} worktree(s) in {target}.")
+    print("Restart Claude Desktop for it to take effect.")
 
 
 def land(repo: Path) -> None:
@@ -1253,9 +1331,13 @@ def build_parser() -> argparse.ArgumentParser:
     board_p = sub.add_parser("board", help="One-screen status of every active task (dirty/ahead/behind/guard).")
     board_p.add_argument("--watch", action="store_true")
     sub.add_parser("radar", help="List files edited by more than one active task before you merge.")
-    launch_p = sub.add_parser("launch", help="Print the command to open each task's worktree in its program.")
+    launch_p = sub.add_parser("launch", help="Print how to open each task's worktree in its program (CLI or desktop app).")
     launch_p.add_argument("--id")
     launch_p.add_argument("--open", action="store_true", dest="do_open", help="Also open each worktree in the file manager.")
+    dc_p = sub.add_parser("desktop-config", help="Emit/merge a Claude Desktop filesystem-MCP config granting access to every worktree.")
+    dc_p.add_argument("--config", help="Target config file (default: this OS's claude_desktop_config.json).")
+    dc_p.add_argument("--write", action="store_true", help="Merge into the target config file (a .bak backup is kept).")
+    dc_p.add_argument("--server-name", default="filesystem")
     sub.add_parser("land", help="Print a read-only merge plan (order, overlaps, verify reminders).")
     return parser
 
@@ -1265,7 +1347,7 @@ def main() -> None:
     repo = repo_root(Path(args.repo).resolve())
     # Coordination commands read manifests from the main checkout; resolve it so
     # they also work when invoked from inside a worktree.
-    if args.cmd in {"board", "radar", "cleanup", "land", "launch", "status"}:
+    if args.cmd in {"board", "radar", "cleanup", "land", "launch", "status", "desktop-config"}:
         repo = main_checkout(repo)
     if args.cmd == "inspect":
         inspect(repo)
@@ -1308,6 +1390,8 @@ def main() -> None:
         radar(repo)
     elif args.cmd == "launch":
         launch(repo, args.id, args.do_open)
+    elif args.cmd == "desktop-config":
+        desktop_config(repo, args.config, args.write, args.server_name)
     elif args.cmd == "land":
         land(repo)
 

@@ -8,9 +8,9 @@ description: Design, install, and operate safe, agent-neutral parallel AI workfl
 Use this skill to turn any Git repository into a safe workspace for parallel AI
 agents. The user can speak naturally. The workflow turns that request into
 worktrees, branches, manifests, and per-worktree Task Cards. It is
-agent-neutral: Claude Code, Codex, Warp, Gemini, Antigravity, Qwen, and
-openweight coding agents all receive the same work contract and work in separate
-worktrees.
+agent-neutral: Claude Code, Codex, Warp, the Claude Desktop and Codex Desktop
+apps, Gemini, Antigravity, Qwen, and openweight coding agents all receive the
+same work contract and work in separate worktrees.
 
 No API or orchestrator service is required. Everything is plain files in Git
 worktrees, so it works when the user drives several separate programs by hand.
@@ -48,9 +48,12 @@ the frontend without clashing"):
    (each line: `stream | agent | task | path1,path2`). Overlapping paths with
    another active task are refused automatically.
 
-3. **Hand off in one sentence.** Tell the user which folder to open in each agent
-   (`python scripts/multiagent.py launch` prints the exact open command per
-   program) and to say: *"Work on the current task in `.agents/current-task.md`."*
+3. **Hand off in one sentence.** `python scripts/multiagent.py launch` prints the
+   right steps per program — CLI agents get a `cd && run`; desktop apps (Claude
+   Desktop / Codex Desktop) get app-specific steps. For Claude Desktop,
+   `python scripts/multiagent.py desktop-config --write` grants it filesystem
+   access to every worktree at once. Each agent then only needs:
+   *"Work on the current task in `.agents/current-task.md`."*
 
 4. **Watch, then land.** `python scripts/multiagent.py board` (add `--watch`)
    shows every agent's status and guard state on one screen. Before merging, run
@@ -158,15 +161,20 @@ Ask before proceeding when:
 
 - `scripts/multiagent.py`: cross-project CLI. Setup: `inspect`, `setup`/`init`,
   `install`, `install-hooks`, `doctor`, `examples`. Run: `dispatch` (incl.
-  `--from` batch), `status`, `board` (`--watch`), `launch`, `handoff`. Safety:
-  `guard` (and `guard --staged` for the pre-commit hook), `radar` (cross-task
-  file overlap). Finish: `land` (merge plan), `close`, `cleanup`.
+  `--from` batch), `status`, `board` (`--watch`), `launch`, `desktop-config`
+  (Claude Desktop filesystem MCP), `handoff`. Safety: `guard` (and
+  `guard --staged` for the pre-commit hook), `radar` (cross-task file overlap).
+  Finish: `land` (merge plan), `close`, `cleanup`.
 - `tests/test_workflow.py`: end-to-end test on a throwaway repo proving universal
   setup, one-line dispatch, dispatch-time overlap blocking, guard catching
   out-of-lane edits, and multi-program discovery. Run `python tests/test_workflow.py`.
 - `tests/test_upgrade.py`: tests the upgrade commands — real-time pre-commit
   block, board, radar, batch dispatch, launch, land, cleanup. Run
   `python tests/test_upgrade.py`.
+- `tests/test_desktop.py`: tests the desktop-app flow — claude-desktop/
+  codex-desktop inference, desktop-aware launch output, and desktop-config
+  generating/merging the Claude Desktop filesystem config. Run
+  `python tests/test_desktop.py`.
 - `tests/test_vs_baseline.py`: A/B test proving the workflow beats NOT using it.
   It reproduces the two failures of a shared working tree (one agent's commit
   sweeping in another's in-progress files; silent same-file clobber) and shows

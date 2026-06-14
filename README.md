@@ -211,7 +211,23 @@ Please work on the current task in .agents/current-task.md.
 
 ## Install The Skill
 
-Install from this GitHub repository with the Codex skill installer:
+**One line, into any Git repo** (run from inside the repo):
+
+```bash
+# macOS / Linux / Git Bash
+curl -fsSL https://raw.githubusercontent.com/peetwan/workflow_multiagents/main/install.sh | sh
+```
+
+```powershell
+# Windows PowerShell
+irm https://raw.githubusercontent.com/peetwan/workflow_multiagents/main/install.ps1 | iex
+```
+
+It drops `scripts/multiagent.py` in and runs `ready --commit` (install + guard
+hook + bootstrap commit + readiness check). Set `MAW_SOURCE` to a local
+`multiagent.py` to install offline.
+
+Or install from this GitHub repository with the Codex skill installer:
 
 ```text
 peetwan/workflow_multiagents

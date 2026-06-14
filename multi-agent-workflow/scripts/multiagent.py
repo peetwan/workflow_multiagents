@@ -420,7 +420,14 @@ def install(repo: Path, force: bool = False, agent_files: bool = True) -> None:
                 ],
             )
     append_unique_lines(repo / ".gitignore", ["", "# Multi-agent workflow runtime", *RUNTIME_GITIGNORE])
-    shutil.copy2(Path(__file__).resolve(), repo / "scripts" / "multiagent.py")
+    src = Path(__file__).resolve()
+    dst = repo / "scripts" / "multiagent.py"
+    try:
+        same = dst.exists() and os.path.samefile(src, dst)
+    except OSError:
+        same = src == dst.resolve()
+    if not same:
+        shutil.copy2(src, dst)
     if agent_files:
         write_agent_entrypoints(repo, force=force)
     print(f"Installed universal multi-agent workflow in {repo}")

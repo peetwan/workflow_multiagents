@@ -50,3 +50,6 @@ jobs:
 
       - name: MCP actions + Codex test (dispatch/close from chat, codex write)
         run: python multi-agent-workflow/tests/test_mcp_actions.py
+
+      - name: One-line installer test (install.sh / install.ps1)
+        run: python multi-agent-workflow/tests/test_installer.py

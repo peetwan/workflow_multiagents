@@ -38,6 +38,7 @@ AGENT_TYPE_NOTES = {
     "gemini": "Gemini note: set your shell or IDE working directory to the worktree before reading or editing files.",
     "antigravity": "Antigravity note: attach/open the generated worktree as the project workspace before starting.",
     "qwen": "Qwen note: treat this Task Card as the full contract and avoid broad rewrites outside the allowed paths.",
+    "warp": "Warp note: open this worktree folder in your Warp session. Warp reads AGENTS.md and the Task Card; keep edits inside the allowed paths.",
     "openweight": "Openweight/local note: run shell commands from the worktree and ask before destructive or unclear actions.",
 }
 
@@ -46,6 +47,7 @@ AGENT_ENTRYPOINTS = {
     "GEMINI.md": "Gemini",
     "ANTIGRAVITY.md": "Antigravity",
     "QWEN.md": "Qwen",
+    "WARP.md": "Warp",
     "OPENWEIGHT.md": "Openweight/local agents",
 }
 
@@ -288,7 +290,7 @@ def write_default_config(repo: Path, force: bool = False) -> Path:
         'task_contract_version = "1"',
         f'default_base = "{base}"',
         'worktree_root = "../_worktrees"',
-        'supported_agent_types = ["generic", "codex", "claude", "gemini", "antigravity", "qwen", "openweight"]',
+        'supported_agent_types = ["generic", "codex", "claude", "gemini", "antigravity", "qwen", "warp", "openweight"]',
         "",
     ]
     for name, data in streams.items():
@@ -385,9 +387,16 @@ def install(repo: Path, force: bool = False, agent_files: bool = True) -> None:
                 """\
                 # Agent Rules
 
-                Read `.agents/workflow.md` and `.agents/quickstart.md` before starting work. Use one branch and one worktree per task.
-                If `.agents/current-task.md` exists, read it before editing.
-                Stay inside the allowed paths in the current Task Card.
+                This file is the cross-tool entry point. Claude Code, Codex, and
+                Warp all read `AGENTS.md` (Claude Code also reads `CLAUDE.md`), so
+                the same rules apply no matter which program opens this folder.
+
+                1. If `.agents/current-task.md` exists, it is your Task Card. Read
+                   it first and work only inside its allowed paths.
+                2. Otherwise read `.agents/workflow.md` and `.agents/quickstart.md`.
+                3. One task = one branch = one worktree. Do not edit another
+                   worktree or paths owned by another task.
+                4. Before reporting done: list changed files, checks run, and risks.
                 """
             ),
             encoding="utf-8",
@@ -631,7 +640,7 @@ def make_task_card(
 def infer_agent_type(agent: str) -> str:
     """Guess the runtime from the agent label so --agent-type can be omitted."""
     name = (agent or "").lower()
-    for kind in ("antigravity", "openweight", "codex", "claude", "gemini", "qwen"):
+    for kind in ("antigravity", "openweight", "codex", "claude", "gemini", "qwen", "warp"):
         if kind in name:
             return kind
     return "generic"
@@ -694,11 +703,18 @@ def dispatch(args: argparse.Namespace, repo: Path) -> None:
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     owned = ", ".join(paths) if paths else "(stream default)"
     print(f"\n[ready] {args.stream} task -> {args.agent} ({agent_type})   id: {task_id}")
-    print("  1. open this folder in the agent:")
+    print("  1. open this folder in your agent program (Claude Code / Codex / Warp / ...):")
     print(f"       {worktree}")
     print('  2. tell it:  Work on the current task in .agents/current-task.md')
     print(f"  owns: {owned}")
     print(f"  branch: {branch}   handoff text: {handoff_path}")
+    if not (worktree / "AGENTS.md").exists():
+        print(
+            f"  ! AGENTS.md is not committed on '{base}', so this worktree does not carry it\n"
+            "    and Codex/Warp/Claude Code may not auto-find the task. Fix once: commit the\n"
+            "    workflow files (git add AGENTS.md CLAUDE.md .agents scripts && git commit) so\n"
+            "    future worktrees include them. For now, paste the step-2 line to the agent."
+        )
     if args.print_handoff:
         print("\nOptional handoff text:\n")
         print(task_card)

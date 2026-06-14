@@ -31,11 +31,11 @@ one user request = one task card = one agent = one branch = one worktree = one m
 The user should speak normally:
 
 ```text
-Set up this repo so Claude, Codex, and Qwen can work in parallel safely.
+Set up this repo so Claude Code, Codex, and Warp can work in parallel safely.
 ```
 
 ```text
-Dispatch Claude for docs, Codex for frontend, and Qwen for tests.
+Dispatch Claude Code for docs, Codex for frontend, and Warp for the API.
 ```
 
 The workflow creates isolated worktrees and writes a Task Card into each
@@ -54,18 +54,47 @@ Please work on the current task in .agents/current-task.md.
 No long copy-paste prompt is required for the normal flow. A handoff text file
 is still generated as a fallback for tools that cannot read files directly.
 
+## No API Needed — Drive Separate Programs By Hand
+
+You do not need an API or an orchestrator service. The whole system is plain
+files in Git worktrees, so it works when you personally drive several separate
+programs — Claude Code, Codex, and Warp — each in its own window.
+
+`AGENTS.md` is the shared standard: Claude Code, Codex, and Warp all read it
+(Claude Code also reads `CLAUDE.md`, Warp also reads `WARP.md`). Commit these
+once and every worktree carries them, so when you open a worktree folder in any
+program it reads `AGENTS.md` -> `.agents/current-task.md` and knows exactly what
+to do.
+
+A hand-driven session:
+
+```powershell
+# In any terminal, set up once and dispatch one task per program:
+python scripts/multiagent.py init
+python scripts/multiagent.py dispatch --stream docs     --task "rewrite README" --agent claude
+python scripts/multiagent.py dispatch --stream frontend --task "polish nav"     --agent codex
+python scripts/multiagent.py dispatch --stream api      --task "rate limiting"   --agent warp
+```
+
+Each dispatch prints a worktree folder. Open it in its program (Claude Code /
+Codex / Warp) and say: "Work on the current task in .agents/current-task.md."
+When they finish, run `python scripts/multiagent.py guard` to confirm none of
+them edited outside its lane, then merge. Commit the workflow files once before
+dispatching (the installer creates them); `dispatch` warns if you forget.
+
 ## Agent Support
 
-The workflow is not limited to Codex. Installing it into a project creates
-universal and tool-specific entry files:
+The workflow is not limited to one tool. Installing it into a project creates a
+universal `AGENTS.md` plus thin tool-specific entry files:
 
 ```text
-AGENTS.md
-CLAUDE.md
-GEMINI.md
-ANTIGRAVITY.md
-QWEN.md
-OPENWEIGHT.md
+AGENTS.md       <- Claude Code, Codex, and Warp all read this
+CLAUDE.md       <- Claude Code
+GEMINI.md       <- Gemini
+ANTIGRAVITY.md  <- Antigravity
+QWEN.md         <- Qwen
+WARP.md         <- Warp
+OPENWEIGHT.md   <- local / open-weight agents
 ```
 
 These files all point agents to the same source of truth:
@@ -137,7 +166,7 @@ only touched files inside its allowed paths.
 Supported `--agent-type` values:
 
 ```text
-generic, codex, claude, gemini, antigravity, qwen, openweight
+generic, codex, claude, gemini, antigravity, qwen, warp, openweight
 ```
 
 ## Generated Project Files
@@ -158,6 +187,7 @@ CLAUDE.md
 GEMINI.md
 ANTIGRAVITY.md
 QWEN.md
+WARP.md
 OPENWEIGHT.md
 ```
 

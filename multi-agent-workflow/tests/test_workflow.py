@@ -129,6 +129,8 @@ def main() -> int:
         a = cli(repo, "dispatch", "--stream", "frontend", "--task", "nav polish",
                 "--agent", "claude-a", "--agent-type", "claude", "--paths", "frontend/")
         check("dispatch A (frontend) exits 0", a.returncode == 0, a.stderr)
+        check("dispatch warns when workflow files are not committed to base",
+              "not committed" in a.stdout, a.stdout)
         # Minimal 3-flag form: no --agent-type (inferred from the name) and no
         # --paths (defaults to the stream's). This is the seamless path.
         b = cli(repo, "dispatch", "--stream", "backend", "--task", "auth fix",
@@ -169,6 +171,25 @@ def main() -> int:
         g2 = cli(repo, "guard", "--id", ma["id"])
         check("guard passes when A stays in frontend (exit 0)", g2.returncode == 0, g2.stdout + g2.stderr)
         check("guard confirms in-scope changes", "inside allowed paths" in g2.stdout, g2.stdout)
+
+        # --- 4. Multi-program discovery (no API; the human drives the apps) --
+        print("\n[4] Each program (Claude Code / Codex / Warp) auto-finds its task")
+        # Bootstrap: commit the workflow files so every new worktree carries them.
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "chore: install multi-agent workflow")
+        d = cli(repo, "dispatch", "--stream", "docs", "--task", "rewrite readme", "--agent", "warp-d")
+        check("dispatch D (warp, minimal form) exits 0", d.returncode == 0, d.stderr)
+        check("no missing-AGENTS.md warning after bootstrap commit", "not committed" not in d.stdout, d.stdout)
+        md = manifest_for(repo, "warp-d")
+        check("agent-type inferred as warp", md.get("agentType") == "warp", str(md.get("agentType")))
+        wtd = Path(md["worktreePath"])
+        check("worktree carries AGENTS.md (Codex + Warp read this)", (wtd / "AGENTS.md").exists())
+        check("worktree carries CLAUDE.md (Claude Code reads this)", (wtd / "CLAUDE.md").exists())
+        check("worktree carries WARP.md (Warp also reads this)", (wtd / "WARP.md").exists())
+        check("worktree has the Task Card", (wtd / ".agents" / "current-task.md").exists())
+        agents_txt = (wtd / "AGENTS.md").read_text(encoding="utf-8") if (wtd / "AGENTS.md").exists() else ""
+        check("AGENTS.md points every tool to the Task Card",
+              ".agents/current-task.md" in agents_txt, agents_txt[:200])
 
         print(f"\n==== {PASSED} passed, {FAILED} failed ====")
         return 0 if FAILED == 0 else 1

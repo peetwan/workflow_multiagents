@@ -1,6 +1,6 @@
 ---
 name: multi-agent-workflow
-description: Design, install, and operate safe, agent-neutral parallel AI workflows across any Git repository. Use when the user wants to speak in natural language and have multiple Codex, Claude, Gemini, Antigravity, Qwen, openweight/open-source models, or other coding agents work at the same time without overwriting each other; wants a universal worktree/branch/task-card dispatch system; wants repo-local adapter files such as AGENTS.md, CLAUDE.md, GEMINI.md, ANTIGRAVITY.md, QWEN.md, or OPENWEIGHT.md; wants path ownership, preflight checks, or GitHub publishing guidance for multi-agent development.
+description: Design, install, and operate safe, agent-neutral parallel AI workflows across any Git repository. Use when the user wants to speak in natural language and have multiple coding agents — including separate programs driven by hand with no API, such as Claude Code, Codex, and Warp, plus Gemini, Antigravity, Qwen, or openweight/open-source models — work at the same time without overwriting each other; wants a universal worktree/branch/task-card dispatch system; wants repo-local adapter files such as AGENTS.md, CLAUDE.md, GEMINI.md, ANTIGRAVITY.md, QWEN.md, WARP.md, or OPENWEIGHT.md; wants path ownership, preflight checks, or GitHub publishing guidance for multi-agent development.
 ---
 
 # Multi-Agent Workflow
@@ -8,9 +8,16 @@ description: Design, install, and operate safe, agent-neutral parallel AI workfl
 Use this skill to turn any Git repository into a safe workspace for parallel AI
 agents. The user can speak naturally. The workflow turns that request into
 worktrees, branches, manifests, and per-worktree Task Cards. It is
-agent-neutral: Codex, Claude, Gemini, Antigravity, Qwen, and openweight coding
-agents all receive the same work contract and work in separate worktrees. The
-default design is:
+agent-neutral: Claude Code, Codex, Warp, Gemini, Antigravity, Qwen, and
+openweight coding agents all receive the same work contract and work in separate
+worktrees.
+
+No API or orchestrator service is required. Everything is plain files in Git
+worktrees, so it works when the user drives several separate programs by hand.
+`AGENTS.md` is the cross-tool anchor — Claude Code, Codex, and Warp all read it
+(Claude Code also reads `CLAUDE.md`, Warp also reads `WARP.md`). Once those files
+are committed, opening a worktree in any program leads it from `AGENTS.md` to
+`.agents/current-task.md`. The default design is:
 
 ```text
 one user request = one task card = one agent = one branch = one worktree = one manifest

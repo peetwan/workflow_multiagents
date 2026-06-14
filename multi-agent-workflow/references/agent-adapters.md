@@ -25,7 +25,13 @@ Card.
 | `gemini` | Gemini CLI or IDE agent | Set shell/IDE cwd to the worktree before file operations |
 | `antigravity` | Antigravity agent/workspace | Attach the generated worktree as the project workspace |
 | `qwen` | Qwen coding agents | Treat the Task Card as the full task contract; avoid broad rewrites |
+| `warp` | Warp terminal agent | Open the worktree folder as the Warp session; Warp reads `AGENTS.md` (and `WARP.md`) plus the Task Card |
 | `openweight` | Local/open-source/openweight model agents | Use shell commands from the worktree and ask before unclear destructive actions |
+
+`AGENTS.md` is the cross-tool standard: Claude Code, Codex, and Warp all read it,
+so a worktree that carries a committed `AGENTS.md` pointing to
+`.agents/current-task.md` is enough for any of those programs to discover its
+task with no API.
 
 ## Minimum Task Card Contract
 
@@ -55,6 +61,7 @@ CLAUDE.md
 GEMINI.md
 ANTIGRAVITY.md
 QWEN.md
+WARP.md
 OPENWEIGHT.md
 ```
 
